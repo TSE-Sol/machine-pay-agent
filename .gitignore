@@ -16,3 +16,7 @@ node_modules/
 keys/
 *keypair*.json
 wallet*.json
+
+# Agent runtime files
+agent/audit.log
+agent/PAUSED

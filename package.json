@@ -10,10 +10,13 @@
   "scripts": {
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
+    "agent": "node agent/index.js",
     "keys": "node scripts/make-keys.js",
-    "test:pay": "node scripts/test-pay.js"
+    "test:pay": "node scripts/test-pay.js",
+    "test": "node --test --test-reporter=spec agent/*.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
     "@solana-program/token": "^0.16.1",
     "@solana/kit": "^8.6.0",
     "@x402/core": "^2.31.0",
