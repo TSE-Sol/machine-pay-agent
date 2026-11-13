@@ -1,0 +1,16 @@
+# Environment / secrets
+.env
+.env.*
+
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Keypairs / wallets — never commit
+*keypair*.json
+wallet*.json
