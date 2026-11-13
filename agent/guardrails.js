@@ -25,6 +25,15 @@ export function spentLast24h(payments, now) {
   return payments.filter((p) => p.time > now - DAY_MS).reduce((sum, p) => sum + p.amount, 0n);
 }
 
+/**
+ * When the 24-hour spend next goes down: the moment the oldest counted payment turns
+ * 24 hours old. Returns a timestamp in ms, or null if nothing has been spent.
+ */
+export function budgetNextResetAt(payments, now) {
+  const counted = payments.filter((p) => p.time > now - DAY_MS).map((p) => p.time);
+  return counted.length === 0 ? null : Math.min(...counted) + DAY_MS;
+}
+
 /** Kill switch: AGENT_PAUSED=true (or the agent/PAUSED file) stops all payments. */
 export function checkKillSwitch(limits) {
   return limits.paused ? fail("kill-switch", "agent is paused (AGENT_PAUSED=true); all payments are stopped") : pass("kill-switch");

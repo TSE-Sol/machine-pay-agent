@@ -22,6 +22,7 @@ export const config = {
   walletPath: env.AGENT_WALLET_PATH ?? "keys/test-payer.json",
   auditLogPath: env.AGENT_AUDIT_LOG ?? "agent/audit.log",
   pauseFilePath: "agent/PAUSED",
+  pidFilePath: "agent/agent.pid", // lets `npm run demo:reset` see that the agent is running
 
   // Dashboard / control plane: where phase events go and where approvals are answered.
   controlUrl: env.AGENT_CONTROL_URL ?? env.CHARGER_SERVER_URL ?? `http://localhost:${env.PORT ?? 4020}`,

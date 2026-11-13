@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
   authorizePayment,
+  budgetNextResetAt,
   checkAllowlist,
   checkDailyBudget,
   checkKillSwitch,
@@ -95,6 +96,17 @@ describe("DAILY_BUDGET_USDC", () => {
   test("adds up many small payments", () => {
     const history = Array.from({ length: 25 }, (_, i) => paid(30 + i)); // 25 x 0.20 = 5.00
     assert.equal(evaluate({ payments: history, limits: limits({ maxPaymentsPer10Min: 100 }) }).allowed, false);
+  });
+});
+
+describe("when the budget frees up", () => {
+  test("it is 24 hours after the oldest payment that still counts", () => {
+    const history = [paid(23 * 60), paid(60), paid(5), { time: NOW - 30 * HOUR, amount: 200_000n }];
+    assert.equal(budgetNextResetAt(history, NOW), NOW - 23 * HOUR + 24 * HOUR); // the 23-hour-old payment expires in 1 hour
+  });
+  test("there is nothing to wait for when nothing was spent in the last 24 hours", () => {
+    assert.equal(budgetNextResetAt([], NOW), null);
+    assert.equal(budgetNextResetAt([{ time: NOW - 25 * HOUR, amount: 200_000n }], NOW), null);
   });
 });
 

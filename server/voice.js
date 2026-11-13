@@ -13,9 +13,9 @@ import { requireLocal, requireToken } from "./auth.js";
 import { config } from "./config.js";
 import { getDevice } from "./devices.js";
 import { emit, subscribe } from "./events.js";
-import { getRobot, lastPayment, pendingApprovals, resolveApproval, setPaused } from "./state.js";
+import { getRobot, getVoiceId, lastPayment, pendingApprovals, resolveApproval, setPaused, setVoiceId } from "./state.js";
 import { executeVoiceCommand, parseVoiceCommand } from "./voice-commands.js";
-import { approvalLine, lowBatteryLine, paidLine, planLine, refusedLine, statusLine } from "./voice-lines.js";
+import { PREVIEW_LINE, approvalLine, lowBatteryLine, paidLine, planLine, refusedLine, statusLine } from "./voice-lines.js";
 
 const elevenlabs = config.elevenLabsApiKey ? new ElevenLabsClient({ apiKey: config.elevenLabsApiKey, maxRetries: 1, timeoutInSeconds: 20 }) : null;
 
@@ -25,16 +25,18 @@ const VOICE_SETTINGS = { stability: 0.8, similarityBoost: 0.75, style: 0, speed:
 // --- Text-to-Speech, cached by text hash -------------------------------------------------------
 // The same line is only ever generated (and billed) once: audio is kept in memory and on
 // disk under .cache/voice/, keyed by a hash of the voice, the model, the settings and the text.
+// The voice ID is part of the key, so switching voices never replays another voice's audio.
 
 const cacheDir = fileURLToPath(new URL("../.cache/voice/", import.meta.url));
 const audioCache = new Map(); // hash -> Buffer (mp3)
 
-const hashOf = (text) =>
-  createHash("sha256").update(JSON.stringify([config.voiceId, config.ttsModel, VOICE_SETTINGS, text])).digest("hex").slice(0, 32);
+const hashOf = (text, voiceId) =>
+  createHash("sha256").update(JSON.stringify([voiceId, config.ttsModel, VOICE_SETTINGS, text])).digest("hex").slice(0, 32);
 
-/** Returns { hash, cached } once audio for `text` exists, generating it if needed. */
+/** Returns { hash, cached } once audio for `text` in the current voice exists, generating it if needed. */
 async function synthesize(text) {
-  const hash = hashOf(text);
+  const voiceId = getVoiceId();
+  const hash = hashOf(text, voiceId);
   const file = `${cacheDir}${hash}.mp3`;
   if (!audioCache.has(hash) && existsSync(file)) audioCache.set(hash, readFileSync(file));
   if (audioCache.has(hash)) {
@@ -43,7 +45,7 @@ async function synthesize(text) {
   }
 
   const started = Date.now();
-  const stream = await elevenlabs.textToSpeech.convert(config.voiceId, {
+  const stream = await elevenlabs.textToSpeech.convert(voiceId, {
     text,
     modelId: config.ttsModel,
     outputFormat: "mp3_44100_128",
@@ -144,9 +146,67 @@ subscribe((event) => {
   if (event.type === "onchain_confirmed" && event.matched) announcePayment(event.txSignature, true);
 });
 
+// --- Voice picker ----------------------------------------------------------------------------
+// A short, fixed set of ElevenLabs voices that suit a robot: clear, calm, even. The names and
+// descriptions are fetched from the ElevenLabs voices API (with the server's key) and only
+// voices from this set can be selected.
+
+const CURATED_VOICE_IDS = [
+  "SAz9YHcvj6GT2YYXdXww", // River
+  "cjVigY5qzO86Huf0OWal", // Eric
+  "onwK4e9ZLuTAKqWW03F9", // Daniel
+  "Xb7hH8MSUJpSbSDYk0k2", // Alice
+  "nPczCjzI2devNBz1zQrb", // Brian
+  "XrExE9yKIg1WjnnlVkGX", // Matilda
+];
+
+let voiceList = null; // fetched once, then kept
+
+async function listVoices() {
+  if (voiceList) return voiceList;
+  const wanted = [...new Set([config.voiceId, ...CURATED_VOICE_IDS])]; // the .env default is always offered
+  const { voices } = await elevenlabs.voices.search({ pageSize: 100 });
+  voiceList = wanted
+    .map((id) => voices.find((v) => v.voiceId === id))
+    .filter(Boolean)
+    .map((v) => {
+      const [name, ...style] = v.name.split(" - ");
+      return { voiceId: v.voiceId, name, style: style.join(" - ") || v.labels?.descriptive || "", isDefault: v.voiceId === config.voiceId };
+    });
+  return voiceList;
+}
+
 // --- Routes -----------------------------------------------------------------------------------
 
 export const voice = express.Router();
+
+const needsKey = (req, res, next) => (elevenlabs ? next() : res.status(503).json({ error: "voice is disabled: ELEVENLABS_API_KEY is not set" }));
+
+// The curated voices, for the dashboard's picker. Localhost only, token required.
+voice.get("/voice/voices", requireLocal, requireToken, needsKey, async (req, res) => {
+  try {
+    res.json({ current: getVoiceId(), voices: await listVoices() });
+  } catch (error) {
+    console.warn(`[VOICE] could not list voices: ${error.statusCode ?? ""} ${error.message}`);
+    res.status(502).json({ error: "could not list voices" });
+  }
+});
+
+// Choose the voice for new lines. Only a voice from the curated list is accepted.
+voice.post("/voice/voice", requireLocal, requireToken, needsKey, async (req, res) => {
+  const chosen = (await listVoices().catch(() => [])).find((v) => v.voiceId === req.body?.voiceId);
+  if (!chosen) return res.status(400).json({ error: "voiceId must be one of the listed voices" });
+  setVoiceId(chosen.voiceId);
+  console.log(`[VOICE] voice set to ${chosen.name} (${chosen.voiceId})`);
+  emit("voice_changed", { voiceId: chosen.voiceId, name: chosen.name });
+  res.json({ current: chosen.voiceId });
+});
+
+// Speak a sample line in the current voice.
+voice.post("/voice/preview", requireLocal, requireToken, needsKey, (req, res) => {
+  say("preview", PREVIEW_LINE);
+  res.json({ ok: true });
+});
 
 // Audio for a line the server has already generated. Only existing hashes are served, so
 // this route can never be used to make new (billable) speech.

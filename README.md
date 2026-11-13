@@ -66,6 +66,8 @@ To make a real test payment, fund the test payer on **Solana devnet** (see below
 | POST | `/streams/webhook` | QuickNode Streams destination. Needs a valid QuickNode signature |
 | GET | `/voice/audio/:hash.mp3` | A spoken line the server already generated (cached audio only) |
 | POST | `/voice/command` | Push-to-talk recording; transcribed and matched to one of five commands. Needs the token, localhost only |
+| GET | `/voice/voices` | The curated voices for the dashboard's picker. Needs the token, localhost only |
+| POST | `/voice/voice`, `/voice/preview` | Choose one of the curated voices; speak a sample line. Needs the token, localhost only |
 
 "Needs the token" means the header `Authorization: Bearer <AGENT_EVENTS_TOKEN>`.
 
@@ -208,6 +210,20 @@ Further protections around the guardrails:
 - **A fresh 402 after every approval.** A person can take a minute to answer, and a 402 is only good for about that long. After an approval the agent asks the charger for a new 402 and signs that one, but only if the recipient, token, network and amount are identical to what was approved and every guardrail still passes at that moment (including a kill switch flipped during the wait). If anything changed, it refuses.
 - **Budget errs on the safe side.** A payment is logged as `pending` before it is signed. If the agent crashes or loses the connection mid-payment, that amount still counts against the budget.
 
+### Demo reset (devnet and demo use only)
+
+```bash
+npm run demo:reset
+```
+
+The agent's daily budget and rate limit are computed from `agent/audit.log`. Before recording a demo, this script puts the old log away so the 24-hour spend starts from zero:
+
+- It moves `agent/audit.log` to `agent/audit-archive/audit-<timestamp>.log` (gitignored) and starts an empty log. Nothing is deleted.
+- It refuses to run while the agent is running, and prints what it archived: entries, settled payments and USDC total.
+- It changes nothing on-chain and nothing on the server.
+
+This is a demo convenience, not a feature: it deliberately wipes the memory behind two safety limits. It exists because this project runs on devnet with test funds; a real deployment would not ship it.
+
 ### Agent settings
 
 | Variable | Default | Meaning |
@@ -249,13 +265,14 @@ Both need the same `AGENT_EVENTS_TOKEN` in `.env`.
 
 | Panel | What it shows |
 | --- | --- |
-| Robot | Animated battery gauge, status (delivering, seeking charge, charging), 24-hour budget used and left, and which planner is in use |
-| Chargers | The three Austin chargers with price and status; a charging dock shows a countdown. A small OpenStreetMap map shows the docks and the robot |
+| Robot | Animated battery gauge, status (delivering, seeking charge, charging), which planner is in use, and a 24-hour budget bar: spend against `DAILY_BUDGET_USDC`, amber from 75% and red from 90%, with the time the oldest counted payment expires. The budget is display only: the dashboard has no control that changes any limit |
+| Chargers | The three Austin chargers with price and status; a charging dock shows a countdown |
+| Map | OpenStreetMap view of the docks and the robot. It opens fitted around all of them; zoom with the + / − buttons, the scroll wheel or a pinch, drag to pan, and "Recenter" returns to the fitted view |
 | Agent decision feed | Each charge decision as a card, phase by phase. The planner's reason is highlighted, and every guardrail is a green ✓ or red ✗ chip (hover a chip for the reason). Quiet checks collapse into one line |
 | Payments | Each payment with amount, charger, Solana Explorer link and two confirmation badges: "Facilitator settled" and "QuickNode Streams confirmed" |
 | Approval dialog | Appears when the agent asks for human approval, with a 60-second countdown and Approve / Deny |
 | Kill switch | "Pause payments" in the top bar. While paused, the agent refuses every payment |
-| Voice | "Enable voice" lets the robot speak its decisions (then the same button mutes it); "Hold to talk" takes a spoken command. See [ElevenLabs](#elevenlabs) |
+| Voice | "Enable voice" lets the robot speak its decisions (then the same button mutes it), with a volume slider beside it; "Hold to talk" takes a spoken command; a voice picker with Preview sits in the robot card. See [ElevenLabs](#elevenlabs) |
 
 How it is wired:
 
@@ -437,12 +454,15 @@ The robot speaks at five moments and no others. Each line is built from the even
 | A payment needs a human | "This payment is above my limit. I need your approval." | the approval request |
 | Paid and confirmed on-chain | "Payment confirmed on Solana. Charging now." | spoken once an on-chain check (RPC or QuickNode Streams) has seen the payment |
 | A guardrail refused | "Payment refused: over my per-payment limit." | the guardrail that tripped |
+| The daily budget is used up | "Daily budget reached. I'll stop buying power until it resets." | the daily budget guardrail; the feed shows the same refusal under a "Daily budget reached" headline |
 
 To avoid chatter, a retrying agent does not repeat itself: the low-battery line is said once per low-battery episode and an identical refusal at most once every two minutes.
 
-In the browser, sound starts only after you click **Enable voice** (browsers block audio until the page has been clicked). The same button then mutes and unmutes. The last line is always shown as text in the robot card, so the dashboard reads the same with the sound off.
+In the browser, sound starts only after you click **Enable voice** (browsers block audio until the page has been clicked). The same button then mutes and unmutes, and the slider beside it sets the volume from 0 to 100% (remembered in that browser). The last line is always shown as text in the robot card, so the dashboard reads the same with the sound off.
 
-**Caching.** Audio is cached by a hash of the voice, model, settings and text, in memory and on disk under `.cache/voice/` (gitignored). A line that has been spoken before is served from the cache with no ElevenLabs call, so repeated lines such as "Payment confirmed on Solana. Charging now." are billed once. The server log shows which happened:
+**Voice picker.** The robot card has a dropdown of six ElevenLabs voices that suit a robot (River, Eric, Daniel, Alice, Brian, Matilda), plus the `.env` default if it is a different one. Their names and styles come from the ElevenLabs voices API, fetched by the server with its key. Choosing one changes the voice for new lines until the server restarts; **Preview** speaks a sample line in the current voice. The picker works only on localhost with `AGENT_EVENTS_TOKEN`, and the server accepts only voices from its own list.
+
+**Caching.** Audio is cached by a hash of the voice ID, model, settings and text, in memory and on disk under `.cache/voice/` (gitignored). Because the voice ID is part of the key, switching voices never replays another voice's audio; each voice builds its own cache. A line that has been spoken before is served from the cache with no ElevenLabs call, so repeated lines such as "Payment confirmed on Solana. Charging now." are billed once. The server log shows which happened:
 
 ```
 [VOICE] tts call   "Battery at 19 percent. Looking for a charger." -> 41 KB in 312 ms (eleven_flash_v2_5)

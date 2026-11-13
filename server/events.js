@@ -26,6 +26,7 @@ const logLine = {
     `[STREAMS] ${e.amountUSDC} USDC confirmed on-chain sig=${e.txSignature} slot=${e.slot}${e.matched ? ` -> ${e.deviceId}` : " (no matching session)"}`,
   streams_rejected: (e) => `[STREAMS] webhook rejected: ${e.reason}`,
   robot_speech: () => null, // server/voice.js logs its own [VOICE] lines
+  voice_changed: () => null,
   voice_command: (e) => `[VOICE] heard "${e.transcript}" -> ${e.command ? e.command.toUpperCase() : "no action"} (${e.outcome})`,
 };
 

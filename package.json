@@ -13,8 +13,9 @@
     "agent": "node agent/index.js",
     "keys": "node scripts/make-keys.js",
     "test:pay": "node scripts/test-pay.js",
-    "test": "node --test --test-reporter=spec agent/*.test.js server/*.test.js streams/*.test.js",
-    "tunnel": "node scripts/tunnel.js"
+    "tunnel": "node scripts/tunnel.js",
+    "demo:reset": "node scripts/demo-reset.js",
+    "test": "node --test --test-reporter=spec agent/*.test.js server/*.test.js streams/*.test.js scripts/*.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",

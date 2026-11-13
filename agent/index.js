@@ -1,11 +1,11 @@
 // Entry point: `npm run agent`. Starts the simulated robot and runs the decision loop.
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { requestApproval } from "./approval.js";
 import { AuditLog } from "./audit.js";
 import { createChargerClient } from "./charger.js";
 import { config, formatUsdc } from "./config.js";
 import { createControlClient } from "./control.js";
-import { spentLast24h } from "./guardrails.js";
+import { budgetNextResetAt, spentLast24h } from "./guardrails.js";
 import { runCycle } from "./loop.js";
 import { Robot } from "./robot.js";
 import { loadWallet } from "./wallet.js";
@@ -37,13 +37,16 @@ const currentLimits = () => ({ ...limits, paused: isPaused() });
 
 /** The robot's state as shown on the dashboard. Money is in USDC base units (strings). */
 function robotState() {
-  const spent = spentLast24h(audit.payments(), Date.now());
+  const payments = audit.payments();
+  const spent = spentLast24h(payments, Date.now());
   const left = limits.dailyBudget > spent ? limits.dailyBudget - spent : 0n;
+  const nextReset = budgetNextResetAt(payments, Date.now());
   return {
     ...robot.snapshot(),
     budgetUsed: spent.toString(),
     budgetLeft: left.toString(),
     dailyBudget: limits.dailyBudget.toString(),
+    budgetNextResetAt: nextReset ? new Date(nextReset).toISOString() : null, // when the oldest counted payment ages out
     planner: config.planner.apiKey ? "claude" : "rules",
     model: config.planner.apiKey ? config.planner.model : null,
     wallet: wallet.address,
@@ -61,6 +64,11 @@ function log(phase, message, data = {}) {
 /** Ask a human, in the terminal and on the dashboard at once. First answer wins; silence means no. */
 const askHuman = (question, request) =>
   requestApproval({ question, request, control, timeoutMs: config.approvalTimeoutSeconds * 1000 });
+
+// Mark the agent as running (scripts/demo-reset.js refuses to touch the audit log meanwhile).
+writeFileSync(config.pidFilePath, String(process.pid));
+process.on("exit", () => rmSync(config.pidFilePath, { force: true }));
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(0));
 
 console.log(`${robot.id} online | wallet ${wallet.address}`);
 console.log(`  charger server  ${config.serverUrl}`);

@@ -55,7 +55,6 @@ export function paidLine({ confirmedOnChain }) {
 
 const REFUSAL_PHRASES = {
   "per-tx": "over my per-payment limit",
-  daily: "over my daily budget",
   allowlist: "that recipient is not on my allowlist",
   price: "the price does not match what was advertised",
   "rate-limit": "too many payments in the last ten minutes",
@@ -64,9 +63,16 @@ const REFUSAL_PHRASES = {
   requote: "the charger changed its terms",
 };
 
+/** Said when the daily budget guardrail stops a payment. */
+export const DAILY_BUDGET_LINE = "Daily budget reached. I'll stop buying power until it resets.";
+
+/** What the Preview button says, so a voice can be heard before it is used. */
+export const PREVIEW_LINE = "Voice check. This is how I sound when I pay for my own power.";
+
 /** reason: the agent's refusal reason, e.g. "per-tx: 0.20 USDC is over the 0.10 USDC ...". */
 export function refusedLine({ reason }) {
   const guardrail = String(reason ?? "").split(":")[0].trim();
+  if (guardrail === "daily") return DAILY_BUDGET_LINE;
   return `Payment refused: ${REFUSAL_PHRASES[guardrail] ?? "a safety check failed"}.`;
 }
 

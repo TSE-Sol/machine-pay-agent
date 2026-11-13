@@ -16,6 +16,13 @@ export function updateRobot(reported) {
   if (reported && typeof reported === "object") robot = { ...reported, lastSeen: new Date().toISOString() };
 }
 
+// --- Robot voice (which ElevenLabs voice is in use right now) -------------------------------
+// Starts as VOICE_ID from .env; the dashboard's voice picker can change it until the next restart.
+
+let voiceId = config.voiceId;
+export const getVoiceId = () => voiceId;
+export const setVoiceId = (id) => (voiceId = id);
+
 // --- Payments ------------------------------------------------------------------------------
 // Each payment can be confirmed twice, by two independent sources:
 //   facilitatorSettled - the x402 facilitator reported the transaction as settled
@@ -147,6 +154,6 @@ export function snapshot(devices) {
     pendingApprovals: pendingApprovals(),
     paused: isPaused(),
     streams: { configured: Boolean(config.streamsToken), lastDelivery: lastStreamsDelivery },
-    voice: { enabled: Boolean(config.elevenLabsApiKey), ttsModel: config.ttsModel, sttModel: config.sttModel },
+    voice: { enabled: Boolean(config.elevenLabsApiKey), voiceId, ttsModel: config.ttsModel, sttModel: config.sttModel },
   };
 }

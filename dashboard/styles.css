@@ -212,6 +212,51 @@ code,
 .btn[data-state="muted"] {
   color: var(--muted);
 }
+.btn-small {
+  padding: 5px 10px;
+  font-size: 12.5px;
+}
+
+.volume {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.volume input {
+  width: 84px;
+  accent-color: var(--accent);
+}
+.volume span {
+  min-width: 34px;
+}
+
+.voice-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.voice-row label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.voice-row select {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
 .btn-mic {
   touch-action: none; /* hold-to-talk: don't let a long press scroll or select */
   user-select: none;
@@ -251,6 +296,14 @@ code,
   flex-direction: column;
   gap: 16px;
   min-height: 0;
+  overflow-y: auto; /* on a short screen a column scrolls instead of sliding under the footer */
+}
+.column > .card {
+  flex-shrink: 0;
+}
+.column > .card-fill {
+  flex-shrink: 1;
+  min-height: 220px;
 }
 
 .card {
@@ -444,11 +497,19 @@ code,
   background: var(--accent);
   transition: width 0.6s ease, background 0.3s;
 }
-.meter-fill[data-level="high"] {
+.meter-fill[data-level="amber"] {
   background: var(--warning);
 }
-.meter-fill[data-level="full"] {
+.meter-fill[data-level="red"] {
   background: var(--critical);
+}
+.budget-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.budget[data-level="red"] .budget-note {
+  color: #f0a3a3;
 }
 
 /* --- Chargers ---------------------------------------------------------------------- */
@@ -484,8 +545,10 @@ code,
 }
 
 .map {
-  margin-top: 12px;
-  height: 190px;
+  position: relative;
+  z-index: 0; /* keeps Leaflet's layers inside the map box, under dialogs */
+  height: 240px;
+  flex: none;
   border-radius: 10px;
   overflow: hidden;
   background: var(--surface-2);
@@ -494,9 +557,47 @@ code,
 .map .leaflet-tile-pane {
   filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.6);
 }
-.map .leaflet-container {
+.map.leaflet-container {
   background: #111;
   font: inherit;
+}
+/* Zoom buttons and the Recenter button, in the dashboard's dark style */
+.map .leaflet-bar {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.map .leaflet-bar a,
+.map .leaflet-bar a:hover {
+  width: 28px;
+  height: 28px;
+  line-height: 28px;
+  background: var(--surface);
+  color: var(--text);
+  border-bottom: 1px solid var(--hairline);
+}
+.map .leaflet-bar a:hover {
+  background: var(--surface-2);
+}
+.map .leaflet-bar a.leaflet-disabled {
+  background: var(--surface);
+  color: var(--muted);
+}
+.map-recenter {
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.map-recenter:hover {
+  background: var(--surface-2);
 }
 .map .leaflet-control-attribution {
   background: rgba(13, 13, 13, 0.7);
@@ -689,6 +790,14 @@ code,
   color: var(--text-2);
   border-color: var(--hairline);
   background: transparent;
+}
+
+.refused-title {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #fff;
 }
 
 .refused {

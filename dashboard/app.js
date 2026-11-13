@@ -33,7 +33,7 @@ const state = {
   paused: false,
   streams: { configured: false },
   justConfirmed: new Set(), // tx signatures to flash once
-  voice: { available: false, on: false, muted: false }, // available = the server has an ElevenLabs key
+  voice: { available: false, on: false, muted: false, volume: 0.8 }, // available = the server has an ElevenLabs key
 };
 
 // --- Robot card --------------------------------------------------------------------------
@@ -68,8 +68,23 @@ function renderRobot() {
   $("budgetUsed").textContent = `${usdc(used)} USDC`;
   $("budgetLeft").textContent = `${usdc(robot.budgetLeft)} USDC`;
   $("budgetTotal").textContent = `of ${usdc(total)} USDC`;
+  // Display only: the dashboard shows the budget and has no way to change it.
+  const level = share >= 0.9 ? "red" : share >= 0.75 ? "amber" : "ok";
   $("budgetFill").style.width = `${share * 100}%`;
-  $("budgetFill").dataset.level = share >= 1 ? "full" : share >= 0.8 ? "high" : "ok";
+  $("budgetFill").dataset.level = level;
+  $("budgetFill").closest(".budget").dataset.level = level;
+  $("budgetFill").parentElement.setAttribute("aria-label", `Budget used: ${Math.round(share * 100)} percent`);
+  const resets = robot.budgetNextResetAt ? `; the oldest counted payment expires ${whenText(robot.budgetNextResetAt)}` : "";
+  $("budgetNote").textContent = used > 0 ? `${share >= 1 ? "Budget reached. " : ""}Resets as payments age out${resets}.` : "Nothing spent in the last 24 hours.";
+}
+
+/** "today 18:25" / "tomorrow 18:25" / "Sat 18:25" */
+function whenText(iso) {
+  const date = new Date(iso);
+  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const days = Math.round((new Date(date).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000);
+  const day = days === 0 ? "today" : days === 1 ? "tomorrow" : date.toLocaleDateString("en-GB", { weekday: "short" });
+  return `${day} at ${time}`;
 }
 
 // --- Chargers + map ----------------------------------------------------------------------
@@ -101,23 +116,98 @@ function renderChargers() {
 
 let map = null;
 const markers = new Map();
+let mapMovedByViewer = false; // once the viewer zooms or pans, stop refitting the view for them
+let fittingMap = false;
+let fittedTo = ""; // the set of points the current fitted view was computed for
+
+/** Everything the map should show: every charger, and the robot once it has reported in. */
+function mapPoints() {
+  const points = state.devices.map((d) => [d.location.lat, d.location.lng]);
+  if (state.robot?.location) points.push([state.robot.location.lat, state.robot.location.lng]);
+  return points;
+}
+
+/** Zoom and pan so all chargers and the robot are in view, with some padding. */
+function fitMap({ animate = false } = {}) {
+  const points = mapPoints();
+  if (!map || points.length === 0) return;
+  fittingMap = true;
+  map.fitBounds(L.latLngBounds(points), { padding: [28, 28], maxZoom: 16, animate });
+  fittedTo = JSON.stringify(points);
+  mapMovedByViewer = false;
+  if (!animate) fittingMap = false; // an animated fit clears the flag when it finishes (moveend)
+}
+
+function createMap() {
+  map = L.map("map", {
+    zoomControl: true, // + / - buttons
+    scrollWheelZoom: true, // mouse wheel, and trackpad pinch (which browsers send as wheel events)
+    touchZoom: true, // two-finger pinch on touch screens
+    dragging: true, // drag to pan
+    doubleClickZoom: true,
+    zoomSnap: 0.25, // lets the fitted view sit snugly around the points
+    zoomDelta: 0.5,
+  });
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap contributors" }).addTo(map);
+
+  // Any move that we didn't start is the viewer's: leave their view alone from then on.
+  map.on("movestart", () => {
+    if (!fittingMap) mapMovedByViewer = true;
+  });
+  map.on("moveend", () => {
+    fittingMap = false;
+  });
+
+  // "Recenter": back to the view that fits every charger and the robot.
+  const Recenter = L.Control.extend({
+    options: { position: "topright" },
+    onAdd() {
+      const button = L.DomUtil.create("button", "map-recenter");
+      button.type = "button";
+      button.textContent = "Recenter";
+      button.title = "Show all chargers and the robot";
+      L.DomEvent.disableClickPropagation(button);
+      L.DomEvent.on(button, "click", () => fitMap({ animate: true }));
+      return button;
+    },
+  });
+  map.addControl(new Recenter());
+
+  // Leaflet measures its container once. Re-measure after the panel has laid out and whenever
+  // it changes size, or tiles render for the wrong area and part of the map stays blank.
+  const settle = () => {
+    map.invalidateSize();
+    if (!mapMovedByViewer) fitMap();
+  };
+  requestAnimationFrame(settle);
+  new ResizeObserver(settle).observe($("map"));
+  fitMap();
+}
 
 function renderMap() {
   if (!window.L || state.devices.length === 0) return;
-  if (!map) {
-    map = L.map("map", { zoomControl: false, attributionControl: true, scrollWheelZoom: false });
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenStreetMap contributors" }).addTo(map);
-    map.fitBounds(L.latLngBounds(state.devices.map((d) => [d.location.lat, d.location.lng])).pad(0.35));
-  }
+  if (!map) createMap();
+
   const place = (key, location, html, title) => {
-    const icon = L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] });
-    if (markers.has(key)) markers.get(key).setLatLng([location.lat, location.lng]).setIcon(icon);
-    else markers.set(key, L.marker([location.lat, location.lng], { icon, title, keyboard: false }).addTo(map));
+    const marker = markers.get(key);
+    if (!marker) {
+      const icon = L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] });
+      markers.set(key, Object.assign(L.marker([location.lat, location.lng], { icon, title, keyboard: false }).addTo(map), { shownAs: html }));
+      return;
+    }
+    marker.setLatLng([location.lat, location.lng]);
+    if (marker.shownAs !== html) {
+      marker.setIcon(L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] }));
+      marker.shownAs = html;
+    }
   };
   for (const device of state.devices) {
     place(device.id, device.location, `<div class="marker" data-status="${device.status === "charging" ? "charging" : "idle"}">⚡</div>`, device.name);
   }
-  if (state.robot?.location) place("robot", state.robot.location, '<div class="marker-robot"></div>', "robot-01");
+  if (state.robot?.location) place("robot", state.robot.location, '<div class="marker-robot"></div>', state.robot.id ?? "robot");
+
+  // The robot appeared or moved: refit, unless the viewer has taken over the view.
+  if (!mapMovedByViewer && fittedTo !== JSON.stringify(mapPoints())) fitMap();
 }
 
 // --- Decision feed -----------------------------------------------------------------------
@@ -217,10 +307,15 @@ function addAgentEvent(event) {
       cycle.steps.append(step("GUARD", el("div", { class: "chips" }, chips)));
       break;
     }
-    case "REFUSED":
-      cycle.steps.append(step("REFUSED", el("div", { class: "refused", text: message })));
+    case "REFUSED": {
+      // The daily budget is the limit most worth noticing, so it gets a headline.
+      const overBudget = message.startsWith("daily:");
+      cycle.steps.append(
+        step("REFUSED", el("div", { class: "refused" }, overBudget ? el("span", { class: "refused-title", text: "Daily budget reached. No more power will be bought until it resets." }) : null, el("span", { text: message }))),
+      );
       setOutcome(cycle, "refused");
       break;
+    }
     case "PAY":
       if (data.txSignature) {
         cycle.steps.append(step("PAY", el("strong", { text: `${usdc(data.amount)} USDC` }), " paid · ", el("a", { href: data.explorerUrl, target: "_blank", rel: "noopener", class: "mono", text: `${shorten(data.txSignature, 6, 6)} ↗` })));
@@ -254,6 +349,35 @@ function addAgentEvent(event) {
 
 const speechQueue = [];
 let speaking = false;
+let currentAudio = null;
+
+// The volume is the listener's own preference, so it is kept in this browser only.
+function loadVolume() {
+  try {
+    const saved = Number(localStorage.getItem("machinePay.volume"));
+    if (localStorage.getItem("machinePay.volume") !== null && saved >= 0 && saved <= 1) state.voice.volume = saved;
+  } catch {
+    // storage unavailable (private window, blocked): keep the default
+  }
+}
+
+function setVolume(volume) {
+  state.voice.volume = Math.max(0, Math.min(1, volume));
+  if (currentAudio) currentAudio.volume = state.voice.volume; // applies to the line being spoken too
+  try {
+    localStorage.setItem("machinePay.volume", String(state.voice.volume));
+  } catch {
+    // not saved; still applies for this visit
+  }
+  renderVolume();
+}
+
+function renderVolume() {
+  const percent = Math.round(state.voice.volume * 100);
+  $("volume").value = percent;
+  $("volume").disabled = !state.voice.available;
+  $("volumeLabel").textContent = `${percent}%`;
+}
 
 function playNext() {
   if (speaking) return;
@@ -262,8 +386,11 @@ function playNext() {
   speaking = true;
   $("speech").dataset.speaking = "true";
   const audio = new Audio(next);
+  audio.volume = state.voice.volume;
+  currentAudio = audio;
   const done = () => {
     speaking = false;
+    currentAudio = null;
     $("speech").dataset.speaking = "false";
     playNext();
   };
@@ -322,6 +449,29 @@ function renderVoice() {
 }
 
 const micButtons = () => [$("micButton"), $("modalMicButton")];
+
+// Voice picker: a short list of voices chosen on the server. Localhost + token only.
+async function loadVoices() {
+  if (!state.token || !state.voice.available) return;
+  const response = await fetch("/voice/voices", { headers: { Authorization: `Bearer ${state.token}` } }).catch(() => null);
+  if (!response?.ok) return;
+  const { current, voices } = await response.json();
+  $("voicePicker").replaceChildren(
+    ...voices.map((voice) => el("option", { value: voice.voiceId, text: `${voice.name}${voice.style ? ` · ${voice.style}` : ""}${voice.isDefault ? " (default)" : ""}`, selected: voice.voiceId === current })),
+  );
+  $("voiceRow").hidden = false;
+}
+
+async function chooseVoice() {
+  await control("POST", "/voice/voice", { voiceId: $("voicePicker").value });
+}
+
+async function previewVoice() {
+  if (!state.voice.on) state.voice.on = true; // the click on Preview allows sound
+  state.voice.muted = false;
+  renderVoice();
+  await control("POST", "/voice/preview", {});
+}
 
 function toggleVoice() {
   if (!state.voice.on) state.voice.on = true; // this click is what lets the browser play audio
@@ -486,6 +636,7 @@ async function refresh() {
   renderApproval();
   renderPause();
   renderVoice();
+  renderVolume();
 }
 
 let refreshTimer = null;
@@ -510,6 +661,9 @@ function onEvent(event) {
       break;
     case "voice_command":
       onVoiceCommand(event);
+      break;
+    case "voice_changed":
+      $("voicePicker").value = event.voiceId;
       break;
     case "onchain_confirmed":
       if (event.matched) state.justConfirmed.add(event.txSignature);
@@ -567,6 +721,10 @@ async function start() {
   $("denyButton").addEventListener("click", () => answerApproval("deny"));
   $("approvalModal").addEventListener("cancel", (event) => event.preventDefault()); // Esc must not dismiss it silently
   $("voiceButton").addEventListener("click", toggleVoice);
+  $("volume").addEventListener("input", (event) => setVolume(Number(event.target.value) / 100));
+  $("voicePicker").addEventListener("change", chooseVoice);
+  $("previewButton").addEventListener("click", previewVoice);
+  loadVolume();
   // Any first click on the page also turns the robot's voice on (the browser allows sound from
   // then on). This matters when the approval dialog is already covering the Enable voice button.
   document.addEventListener("pointerdown", (event) => {
@@ -590,6 +748,7 @@ async function start() {
   }
 
   await refresh();
+  await loadVoices();
   connect();
   setInterval(() => {
     renderRobot(); // notices when the agent goes quiet

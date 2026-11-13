@@ -32,7 +32,7 @@ describe("spoken lines", () => {
     assert.equal(paidLine({ confirmedOnChain: true }), "Payment confirmed on Solana. Charging now.");
     assert.equal(paidLine({ confirmedOnChain: false }), "Payment settled. Charging now.");
     assert.equal(refusedLine({ reason: "per-tx: 0.20 USDC is over the 0.10 USDC per-payment limit (MAX_PER_TX_USDC)" }), "Payment refused: over my per-payment limit.");
-    assert.equal(refusedLine({ reason: "daily: 0.20 USDC would bring 24h spending to 5.10 USDC" }), "Payment refused: over my daily budget.");
+    assert.equal(refusedLine({ reason: "daily: 0.20 USDC would bring 24h spending to 5.10 USDC" }), "Daily budget reached. I'll stop buying power until it resets.");
     assert.equal(refusedLine({ reason: "allowlist: recipient X is not on the allowlist" }), "Payment refused: that recipient is not on my allowlist.");
     assert.equal(refusedLine({ reason: "kill-switch: agent is paused" }), "Payment refused: payments are paused.");
     assert.equal(refusedLine({ reason: "approval: a human did not approve this payment" }), "Payment refused: it was not approved.");
