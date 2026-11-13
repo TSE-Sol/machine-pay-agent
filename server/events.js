@@ -3,6 +3,7 @@
 import { formatUsdc } from "./config.js";
 
 const clients = new Set();
+const listeners = new Set(); // in-process subscribers (the robot's voice reacts to events)
 const recent = []; // replayed to new subscribers so a fresh dashboard isn't empty
 const RECENT_LIMIT = 200;
 let nextId = 1;
@@ -24,6 +25,8 @@ const logLine = {
   onchain_confirmed: (e) =>
     `[STREAMS] ${e.amountUSDC} USDC confirmed on-chain sig=${e.txSignature} slot=${e.slot}${e.matched ? ` -> ${e.deviceId}` : " (no matching session)"}`,
   streams_rejected: (e) => `[STREAMS] webhook rejected: ${e.reason}`,
+  robot_speech: () => null, // server/voice.js logs its own [VOICE] lines
+  voice_command: (e) => `[VOICE] heard "${e.transcript}" -> ${e.command ? e.command.toUpperCase() : "no action"} (${e.outcome})`,
 };
 
 export function emit(type, data) {
@@ -34,7 +37,19 @@ export function emit(type, data) {
   recent.push(event);
   if (recent.length > RECENT_LIMIT) recent.shift();
   for (const res of clients) send(res, event);
+  for (const listener of listeners) {
+    try {
+      listener(event);
+    } catch (error) {
+      console.error(`[events] listener failed: ${error.message}`);
+    }
+  }
   return event;
+}
+
+/** Call `listener(event)` for every event emitted from now on. */
+export function subscribe(listener) {
+  listeners.add(listener);
 }
 
 function send(res, event) {

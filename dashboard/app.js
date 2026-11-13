@@ -33,6 +33,7 @@ const state = {
   paused: false,
   streams: { configured: false },
   justConfirmed: new Set(), // tx signatures to flash once
+  voice: { available: false, on: false, muted: false }, // available = the server has an ElevenLabs key
 };
 
 // --- Robot card --------------------------------------------------------------------------
@@ -249,6 +250,137 @@ function addAgentEvent(event) {
   }
 }
 
+// --- Voice: the robot speaks (ElevenLabs TTS), the operator commands (ElevenLabs STT) ------
+
+const speechQueue = [];
+let speaking = false;
+
+function playNext() {
+  if (speaking) return;
+  const next = speechQueue.shift();
+  if (!next) return;
+  speaking = true;
+  $("speech").dataset.speaking = "true";
+  const audio = new Audio(next);
+  const done = () => {
+    speaking = false;
+    $("speech").dataset.speaking = "false";
+    playNext();
+  };
+  audio.onended = done;
+  audio.onerror = done;
+  audio.play().catch(done); // blocked or failed: skip this line
+}
+
+function onRobotSpeech(event) {
+  $("speech").hidden = false;
+  $("speechText").textContent = `“${event.text}”`;
+  // Only speak lines that are happening now, not the history replayed on page load.
+  const fresh = Date.now() - Date.parse(event.time) < 15_000;
+  if (fresh && event.audioUrl && state.voice.on && !state.voice.muted) {
+    speechQueue.push(event.audioUrl);
+    playNext();
+  }
+}
+
+function onVoiceCommand(event) {
+  feedTop(
+    el(
+      "div",
+      { class: "heard" },
+      el("span", { text: "🎙" }),
+      el("span", { class: "said", text: `“${event.transcript || "(nothing heard)"}”` }),
+      el("span", { text: "→" }),
+      el("span", { class: "badge", "data-tone": event.command ? (event.done ? "good" : "warn") : "neutral", text: event.command ? `${event.command.toUpperCase()} (voice)` : "no action" }),
+      el("span", { class: "outcome", text: `${event.outcome} · ${clock(event.time)}` }),
+    ),
+  );
+}
+
+function renderVoice() {
+  const voice = state.voice;
+  const button = $("voiceButton");
+  button.disabled = !voice.available;
+  if (!voice.available) {
+    button.textContent = "Voice off";
+    button.title = "Voice is disabled: ELEVENLABS_API_KEY is not set on the server";
+  } else if (!voice.on) {
+    button.textContent = "Enable voice";
+    button.title = "Browsers only allow sound after a click";
+    button.dataset.state = "off";
+  } else {
+    button.textContent = voice.muted ? "🔇 Voice muted" : "🔊 Voice on";
+    button.title = voice.muted ? "Click to unmute the robot" : "Click to mute the robot";
+    button.dataset.state = voice.muted ? "muted" : "on";
+  }
+  // Two mic buttons share one behaviour: the top bar, and the approval dialog (which covers the top bar).
+  for (const mic of micButtons()) {
+    mic.disabled = !voice.available || !state.token;
+    if (!voice.available) mic.title = "Voice is disabled: ELEVENLABS_API_KEY is not set on the server";
+    else if (!state.token) mic.title = "Voice commands only work from the dashboard on localhost";
+  }
+}
+
+const micButtons = () => [$("micButton"), $("modalMicButton")];
+
+function toggleVoice() {
+  if (!state.voice.on) state.voice.on = true; // this click is what lets the browser play audio
+  else state.voice.muted = !state.voice.muted;
+  if (state.voice.muted) speechQueue.length = 0;
+  renderVoice();
+}
+
+// Push-to-talk: hold the mic button, speak, release. The recording goes to the server,
+// which transcribes it with ElevenLabs and matches it against five fixed commands.
+let micStream = null;
+let recorder = null;
+let holding = false;
+
+function micLabel(text, state_) {
+  for (const mic of micButtons()) {
+    mic.textContent = text;
+    mic.dataset.state = state_ ?? "";
+  }
+}
+
+async function startTalking() {
+  if (holding || recorder) return;
+  holding = true;
+  try {
+    micStream ??= await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    holding = false;
+    return micLabel("🎙 Mic blocked");
+  }
+  if (!holding) return micLabel("🎙 Mic ready, hold to talk"); // released while the permission prompt was open
+  const chunks = [];
+  recorder = new MediaRecorder(micStream);
+  recorder.ondataavailable = (event) => chunks.push(event.data);
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+    recorder = null;
+    sendRecording(blob);
+  };
+  recorder.start();
+  micLabel("🎙 Listening… release to send", "listening");
+}
+
+function stopTalking() {
+  holding = false;
+  if (recorder?.state === "recording") recorder.stop();
+}
+
+async function sendRecording(blob) {
+  if (blob.size < 1000) return micLabel("🎙 Hold to talk");
+  micLabel("🎙 Transcribing…", "busy");
+  try {
+    // The result appears in the feed through the event stream (type "voice_command").
+    await fetch("/voice/command", { method: "POST", headers: { "Content-Type": blob.type || "audio/webm", Authorization: `Bearer ${state.token}` }, body: blob });
+  } finally {
+    micLabel("🎙 Hold to talk");
+  }
+}
+
 // --- Payments ----------------------------------------------------------------------------
 
 function confirmation(on, label, detail, flash) {
@@ -342,6 +474,7 @@ async function refresh() {
   state.payments = snapshot.payments;
   state.paused = snapshot.paused;
   state.streams = snapshot.streams;
+  state.voice.available = Boolean(snapshot.voice?.enabled);
   state.approval = snapshot.pendingApprovals[0] ?? null;
   if (snapshot.robot && !state.robot) {
     state.robot = snapshot.robot;
@@ -352,6 +485,7 @@ async function refresh() {
   renderPayments();
   renderApproval();
   renderPause();
+  renderVoice();
 }
 
 let refreshTimer = null;
@@ -370,6 +504,12 @@ function onEvent(event) {
         renderMap();
       }
       addAgentEvent(event);
+      break;
+    case "robot_speech":
+      onRobotSpeech(event);
+      break;
+    case "voice_command":
+      onVoiceCommand(event);
       break;
     case "onchain_confirmed":
       if (event.matched) state.justConfirmed.add(event.txSignature);
@@ -426,6 +566,28 @@ async function start() {
   $("approveButton").addEventListener("click", () => answerApproval("approve"));
   $("denyButton").addEventListener("click", () => answerApproval("deny"));
   $("approvalModal").addEventListener("cancel", (event) => event.preventDefault()); // Esc must not dismiss it silently
+  $("voiceButton").addEventListener("click", toggleVoice);
+  // Any first click on the page also turns the robot's voice on (the browser allows sound from
+  // then on). This matters when the approval dialog is already covering the Enable voice button.
+  document.addEventListener("pointerdown", (event) => {
+    if (state.voice.available && !state.voice.on && event.target !== $("voiceButton")) {
+      state.voice.on = true;
+      renderVoice();
+    }
+  });
+  for (const mic of micButtons()) {
+    mic.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      startTalking();
+    });
+    for (const release of ["pointerup", "pointerleave", "pointercancel"]) mic.addEventListener(release, stopTalking);
+    mic.addEventListener("keydown", (event) => {
+      if ((event.key === " " || event.key === "Enter") && !event.repeat) startTalking();
+    });
+    mic.addEventListener("keyup", (event) => {
+      if (event.key === " " || event.key === "Enter") stopTalking();
+    });
+  }
 
   await refresh();
   connect();

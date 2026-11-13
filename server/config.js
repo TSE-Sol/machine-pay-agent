@@ -27,6 +27,12 @@ export const config = {
   streamsToken: env.QUICKNODE_STREAMS_TOKEN ?? "",
   // Reject Streams webhooks signed longer ago than this (0 turns the age check off).
   streamsMaxAgeSeconds: Number(env.STREAMS_MAX_AGE_SECONDS ?? 900),
+  // ElevenLabs: the robot's voice (text-to-speech) and spoken operator commands (speech-to-text).
+  // The key stays on the server; it is never sent to the browser.
+  elevenLabsApiKey: env.ELEVENLABS_API_KEY ?? "",
+  voiceId: env.ELEVENLABS_VOICE_ID ?? env.VOICE_ID ?? "SAz9YHcvj6GT2YYXdXww", // "River": relaxed, neutral, informative
+  ttsModel: env.ELEVENLABS_TTS_MODEL ?? "eleven_flash_v2_5", // low-latency model (~100 ms)
+  sttModel: env.ELEVENLABS_STT_MODEL ?? "scribe_v3",
   // Real seconds per paid "minute". Leave at 60; lower it (e.g. 1) for quick demos.
   secondsPerMinute: Number(env.DEMO_SECONDS_PER_MINUTE ?? 60),
 };

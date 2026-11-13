@@ -20,3 +20,6 @@ wallet*.json
 # Agent runtime files
 agent/audit.log
 agent/PAUSED
+
+# Generated speech audio (ElevenLabs cache)
+.cache/

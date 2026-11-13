@@ -17,14 +17,15 @@ const shorten = (text) => (text.length > 12 ? `${text.slice(0, 4)}…${text.slic
 export const explorerUrl = (txSignature) => `https://explorer.solana.com/tx/${txSignature}?cluster=devnet`;
 
 /**
- * deps: { robot, config, limits, charger, wallet, audit, askHuman, log, llm? }
+ * deps: { robot, config, limits, getLimits?, charger, wallet, audit, askHuman, log, llm? }
  *   limits  - config.limits with `paused` already resolved for this cycle
+ *   getLimits - optional; returns the limits as they are right now (used to re-check after a wait)
  *   log     - (phase, message, data) => void; data is the structured detail for the dashboard
  *   askHuman - (question, request) => true/false or { approved, by }
  * Returns { outcome, ... } where outcome is one of:
  *   "no_charge_needed" | "charging" | "refused" | "failed"
  */
-export async function runCycle({ robot, config, limits, charger, wallet, audit, askHuman, log: output, llm }) {
+export async function runCycle({ robot, config, limits, getLimits, charger, wallet, audit, askHuman, log: output, llm }) {
   const cycleId = randomUUID().slice(0, 8);
   const log = (phase, message, data = {}) => output(phase, message, { cycleId, ...data });
   const record = (phase, data = {}) => audit.write({ robotId: robot.id, cycleId, phase, ...data });
@@ -155,6 +156,31 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
     return finish("refused", { reasons: decision.reasons });
   }
 
+  // A human may take a minute to answer, and a 402 goes stale in about that time (it carries
+  // a recent blockhash for the transaction). So after an approval, ask the charger for a fresh
+  // 402 and sign that one, but only if its terms are exactly the ones that were just checked
+  // and approved, and every guardrail still passes right now.
+  let signable = { paymentRequired: quoted.paymentRequired, requirement: quote };
+  if (decision.approval === "granted") {
+    const requoted = await charger.requestQuote(plan.deviceId, plan.minutes).catch((error) => ({ ok: false, detail: error.message }));
+    const fresh = requoted.ok ? requoted.paymentRequired.accepts?.[0] : null;
+    const sameTerms = Boolean(fresh) && ["scheme", "network", "asset", "payTo", "amount"].every((field) => fresh[field] === quote[field]);
+    const recheck = sameTerms
+      ? evaluatePayment({ quote: fresh, expectedAmount, limits: getLimits ? getLimits() : limits, payments: audit.payments(), now: Date.now() })
+      : null;
+    if (!recheck?.allowed) {
+      const reasons = !fresh
+        ? [`requote: no usable 402 from ${plan.deviceId} after approval (${requoted.detail ?? "empty accepts list"})`]
+        : !sameTerms
+          ? ["requote: the charger changed its payment terms after the approval"]
+          : recheck.reasons;
+      for (const reason of reasons) log("REFUSED", reason, { reasons });
+      record("GUARD", { requote: true, approved: false, reasons });
+      return finish("refused", { reasons });
+    }
+    signable = { paymentRequired: requoted.paymentRequired, requirement: fresh };
+  }
+
   // PAY: sign the approved request and retry with PAYMENT-SIGNATURE
   const paymentId = randomUUID();
   const payment = { paymentId, deviceId: plan.deviceId, amount: quote.amount, payTo: quote.payTo };
@@ -162,7 +188,7 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
 
   let paymentHeaders;
   try {
-    paymentHeaders = await wallet.signPayment(quoted.paymentRequired, quote);
+    paymentHeaders = await wallet.signPayment(signable.paymentRequired, signable.requirement);
   } catch (error) {
     record("PAY", { ...payment, status: "failed", error: error.message }); // nothing was sent
     log("PAY", `could not sign the payment: ${error.message}`, { failed: true });

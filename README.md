@@ -13,7 +13,7 @@ scripts/     key generation, test payment client, public tunnel
 keys/        local devnet keypairs (gitignored)
 ```
 
-Quick start: `npm install`, `npm run keys`, copy `.env.example` to `.env` and set `MERCHANT_WALLET`, fund the test payer on devnet, then run `npm run dev` in one terminal and `npm run agent` in another, and open http://localhost:4020 to watch. Details are in the [Server](#server), [Agent](#agent), [Dashboard](#dashboard), [QuickNode Streams](#quicknode-streams) and [Solana integration](#solana-integration) sections.
+Quick start: `npm install`, `npm run keys`, copy `.env.example` to `.env` and set `MERCHANT_WALLET`, fund the test payer on devnet, then run `npm run dev` in one terminal and `npm run agent` in another, and open http://localhost:4020 to watch. Details are in the [Server](#server), [Agent](#agent), [Dashboard](#dashboard), [QuickNode Streams](#quicknode-streams), [ElevenLabs](#elevenlabs) and [Solana integration](#solana-integration) sections.
 
 ## Server
 
@@ -45,6 +45,9 @@ To make a real test payment, fund the test payer on **Solana devnet** (see below
 | `DEMO_SECONDS_PER_MINUTE` | `60` | Optional. Set to `1` so a 15-minute session ends after 15 seconds |
 | `AGENT_EVENTS_TOKEN` | (none) | Shared secret for the agent's event feed and the dashboard's controls. Generate one with `openssl rand -hex 24`. Without it those routes are disabled |
 | `QUICKNODE_STREAMS_TOKEN` | (none) | Security token of the QuickNode Stream. Without it every Streams webhook is rejected |
+| `ELEVENLABS_API_KEY` | (none) | Turns on the robot's voice and spoken commands. Server-side only. Without it the dashboard works and voice shows as off |
+| `ELEVENLABS_VOICE_ID` | `SAz9YHcvj6GT2YYXdXww` | Voice the robot speaks with (default: "River") |
+| `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_STT_MODEL` | `eleven_flash_v2_5`, `scribe_v3` | Text-to-speech and speech-to-text models |
 
 ### Endpoints
 
@@ -61,6 +64,8 @@ To make a real test payment, fund the test payer on **Solana devnet** (see below
 | POST | `/agent/approvals`, `/agent/approvals/:id` | Create an approval request (agent) and answer it with `approve` or `deny` (dashboard). Needs the token |
 | POST | `/agent/pause` | Kill switch on or off. Needs the token |
 | POST | `/streams/webhook` | QuickNode Streams destination. Needs a valid QuickNode signature |
+| GET | `/voice/audio/:hash.mp3` | A spoken line the server already generated (cached audio only) |
+| POST | `/voice/command` | Push-to-talk recording; transcribed and matched to one of five commands. Needs the token, localhost only |
 
 "Needs the token" means the header `Authorization: Bearer <AGENT_EVENTS_TOKEN>`.
 
@@ -200,6 +205,7 @@ Further protections around the guardrails:
 - **Second lock in the signing library.** The per-payment cap and the allowlist are also set on the x402 client itself ([agent/wallet.js](agent/wallet.js)), so the library refuses to sign an over-limit or off-allowlist payment even if the guardrail code were skipped.
 - **Sign only what was checked.** The wallet signs the one payment requirement the guardrails approved, not whatever else the 402 lists.
 - **Plans are validated.** A plan naming an unknown or busy charger, or a session length other than 15, 30 or 60, is discarded and the rule-based planner is used.
+- **A fresh 402 after every approval.** A person can take a minute to answer, and a 402 is only good for about that long. After an approval the agent asks the charger for a new 402 and signs that one, but only if the recipient, token, network and amount are identical to what was approved and every guardrail still passes at that moment (including a kill switch flipped during the wait). If anything changed, it refuses.
 - **Budget errs on the safe side.** A payment is logged as `pending` before it is signed. If the agent crashes or loses the connection mid-payment, that amount still counts against the budget.
 
 ### Agent settings
@@ -249,6 +255,7 @@ Both need the same `AGENT_EVENTS_TOKEN` in `.env`.
 | Payments | Each payment with amount, charger, Solana Explorer link and two confirmation badges: "Facilitator settled" and "QuickNode Streams confirmed" |
 | Approval dialog | Appears when the agent asks for human approval, with a 60-second countdown and Approve / Deny |
 | Kill switch | "Pause payments" in the top bar. While paused, the agent refuses every payment |
+| Voice | "Enable voice" lets the robot speak its decisions (then the same button mutes it); "Hold to talk" takes a spoken command. See [ElevenLabs](#elevenlabs) |
 
 How it is wired:
 
@@ -407,6 +414,67 @@ A verified match is then checked against the server's own records: the payment i
 4. Destination: **Webhook**, URL from step 1, no compression (gzip also works).
 5. Copy the Stream's **security token** into `.env` as `QUICKNODE_STREAMS_TOKEN` and restart the server.
 6. Start the Stream, then run `npm run agent`. Within a few seconds of a payment the "QuickNode Streams confirmed" badge lights up.
+
+## ElevenLabs
+
+Voice is how a person works with this robot: it says what it is doing with money as it does it, and the operator can answer out loud. Two ElevenLabs products are used, both called from the server with the official SDK (`@elevenlabs/elevenlabs-js`) in [server/voice.js](server/voice.js).
+
+| Product | Model | Used for |
+| --- | --- | --- |
+| **Text-to-Speech** | `eleven_flash_v2_5` (ElevenLabs' low-latency model, about 100 ms), voice "River" (`SAz9YHcvj6GT2YYXdXww`: relaxed, neutral, informative), MP3 output | The robot speaks its key decisions on the dashboard, and answers "status" |
+| **Speech-to-Text** | `scribe_v3` | The operator holds the mic button and speaks a command; the server transcribes the recording |
+
+The voice, both models and the key are set in `.env` (`ELEVENLABS_VOICE_ID`, `ELEVENLABS_TTS_MODEL`, `ELEVENLABS_STT_MODEL`, `ELEVENLABS_API_KEY`). The voice is given steady settings (stability 0.8, no style) so it sounds even and machine-like while staying clear. The API key is read only by the server and is never sent to the browser: the browser receives finished audio and transcripts.
+
+### The robot speaks (Text-to-Speech)
+
+The robot speaks at five moments and no others. Each line is built from the event's real data ([server/voice-lines.js](server/voice-lines.js)):
+
+| Moment | Example line | Built from |
+| --- | --- | --- |
+| Battery drops below the threshold | "Battery at 18 percent. Looking for a charger." | the robot's battery level |
+| The planner has chosen | "Congress Avenue dock is closest. Buying fifteen minutes for twenty cents." | charger name, minutes and price; it says "is closest" only when that charger really is the nearest idle one |
+| A payment needs a human | "This payment is above my limit. I need your approval." | the approval request |
+| Paid and confirmed on-chain | "Payment confirmed on Solana. Charging now." | spoken once an on-chain check (RPC or QuickNode Streams) has seen the payment |
+| A guardrail refused | "Payment refused: over my per-payment limit." | the guardrail that tripped |
+
+To avoid chatter, a retrying agent does not repeat itself: the low-battery line is said once per low-battery episode and an identical refusal at most once every two minutes.
+
+In the browser, sound starts only after you click **Enable voice** (browsers block audio until the page has been clicked). The same button then mutes and unmutes. The last line is always shown as text in the robot card, so the dashboard reads the same with the sound off.
+
+**Caching.** Audio is cached by a hash of the voice, model, settings and text, in memory and on disk under `.cache/voice/` (gitignored). A line that has been spoken before is served from the cache with no ElevenLabs call, so repeated lines such as "Payment confirmed on Solana. Charging now." are billed once. The server log shows which happened:
+
+```
+[VOICE] tts call   "Battery at 19 percent. Looking for a charger." -> 41 KB in 312 ms (eleven_flash_v2_5)
+[VOICE] cache hit  "Payment confirmed on Solana. Charging now." (no ElevenLabs call)
+```
+
+### The operator speaks (Speech-to-Text)
+
+Open the dashboard in a regular browser such as Chrome (embedded preview panes can block the microphone). Hold **Hold to talk**, say a command, release. The browser records the audio and posts it to `POST /voice/command`; the server transcribes it with ElevenLabs and matches the transcript against a fixed list. The transcript and the result appear in the decision feed, for example `🎙 "approve it" → APPROVE (voice)`.
+
+| Say | What happens |
+| --- | --- |
+| "approve", "yes, approve" | Approves the payment the agent is currently waiting on |
+| "deny", "reject", "don't approve" | Denies it |
+| "pause", "stop all payments" | Kill switch on |
+| "resume" | Kill switch off |
+| "status", "how's the battery" | The robot answers by voice with battery, budget left and last payment |
+
+### Safety boundary for voice
+
+Voice can approve or deny a request the agent has already raised, pause or resume payments, and ask for status. **Voice can never raise a limit, change the allowlist, choose a recipient or an amount, or start a payment.** This holds by construction, not by instruction:
+
+- **No LLM interprets the transcript.** It is matched against fixed word lists in [server/voice-commands.js](server/voice-commands.js). There is nothing to talk into doing something else.
+- **The executor has five commands and four capabilities.** It is handed exactly four functions (list pending approvals, resolve one, set the kill switch, read status). Limits, the allowlist and the wallet live in the agent process and are not reachable from the server's voice code.
+- **Approving cannot create a payment.** "Approve" only answers a request the agent raised after every other guardrail passed. With nothing pending it does nothing; with more than one pending it does nothing and asks for the dashboard.
+- **Risky requests cancel the whole utterance.** Any mention of raising, setting, adding, paying, sending or limits makes the utterance a no-op, even next to a real command ("approve and raise my limit" does nothing).
+- **Doubt resolves to no.** "Don't approve" is a denial. Mixed or negated commands, and anything longer than twelve words, do nothing.
+- **Same protection as the buttons.** `/voice/command` needs `AGENT_EVENTS_TOKEN` and only answers on localhost, so it cannot be driven through the public tunnel.
+
+These rules are covered by tests in [server/voice-commands.test.js](server/voice-commands.test.js).
+
+Without `ELEVENLABS_API_KEY` the system runs exactly as before: the dashboard shows "Voice off", the mic is disabled, and the robot's lines appear as text only.
 
 ## Solana integration
 

@@ -42,6 +42,13 @@ describe("human approval", () => {
     assert.deepEqual(await ask({ control: fakeControl({ answer: "denied" }) }), { approved: false, by: "dashboard" });
   });
 
+  test("a spoken command on the dashboard counts, and is reported as voice", async () => {
+    const control = fakeControl();
+    control.getApproval = async () => ({ status: "approved", by: "voice" });
+    assert.deepEqual(await ask({ control }), { approved: true, by: "voice" });
+    assert.equal(control.resolved, null);
+  });
+
   test("terminal answers first: it wins and the dashboard is told", async () => {
     const control = fakeControl({ answer: "denied", afterPolls: 1000 });
     const result = await ask({ control, terminal: async () => ({ approved: true, by: "terminal" }) });

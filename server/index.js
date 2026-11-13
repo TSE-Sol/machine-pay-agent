@@ -6,6 +6,7 @@ import { control, streamsWebhook } from "./control.js";
 import { deviceStatus, getDevice, isBusy, listDevices, release, reserve, startCharging } from "./devices.js";
 import { sseHandler } from "./events.js";
 import { recordPayment } from "./state.js";
+import { voice } from "./voice.js";
 import { checkPayment, initPayments } from "./x402.js";
 
 assertConfig();
@@ -14,7 +15,9 @@ const app = express();
 app.use(streamsWebhook); // before express.json: signature checks need the raw body
 app.use(express.json());
 app.use(control);
-app.use(express.static(fileURLToPath(new URL("../dashboard", import.meta.url)))); // dashboard at GET /
+app.use(voice);
+// Dashboard at GET /. "no-cache" makes the browser re-check each file, so an update shows up on reload.
+app.use(express.static(fileURLToPath(new URL("../dashboard", import.meta.url)), { setHeaders: (res) => res.set("Cache-Control", "no-cache") }));
 
 app.get("/health", (req, res) => {
   res.json({ ok: true });
@@ -93,4 +96,5 @@ app.listen(config.port, () => {
   console.log(`  facilitator  ${config.facilitatorUrl}`);
   console.log(`  agent token  ${config.agentEventsToken ? "set" : "NOT SET (agent events, approvals and kill switch are disabled)"}`);
   console.log(`  streams      ${config.streamsToken ? "security token set" : "QUICKNODE_STREAMS_TOKEN not set (webhooks are rejected)"}`);
+  console.log(`  voice        ${config.elevenLabsApiKey ? `ElevenLabs on (tts ${config.ttsModel}, stt ${config.sttModel})` : "off (ELEVENLABS_API_KEY not set)"}`);
 });

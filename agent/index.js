@@ -93,7 +93,7 @@ while (true) {
     }
 
     if (Date.now() >= nextAttemptAt) {
-      const result = await runCycle({ robot, config, limits: currentLimits(), charger, wallet, audit, askHuman, log });
+      const result = await runCycle({ robot, config, limits: currentLimits(), getLimits: currentLimits, charger, wallet, audit, askHuman, log });
       lastCycleId = result.cycleId;
       if (result.outcome !== "no_charge_needed") attempts++;
       if (result.outcome === "refused" || result.outcome === "failed") {

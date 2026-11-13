@@ -26,15 +26,16 @@ async function askDashboard(control, id, signal, pollMs) {
   while (!signal.aborted) {
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     const approval = await control.getApproval(id).catch(() => null);
-    if (approval && approval.status !== "pending" && approval.by === "dashboard") {
-      return { approved: approval.status === "approved", by: "dashboard" };
+    // "dashboard" = the Approve / Deny buttons, "voice" = a spoken command on the dashboard.
+    if (approval && approval.status !== "pending" && ["dashboard", "voice"].includes(approval.by)) {
+      return { approved: approval.status === "approved", by: approval.by };
     }
   }
   return never;
 }
 
 /**
- * Returns { approved: boolean, by: "terminal" | "dashboard" | "timeout" }.
+ * Returns { approved: boolean, by: "terminal" | "dashboard" | "voice" | "timeout" }.
  *   request - { deviceId, minutes, amount, payTo } shown on the dashboard
  *   control - control-plane client, or null if the dashboard isn't configured
  */
@@ -67,7 +68,7 @@ export async function requestApproval({ question, request, control, timeoutMs = 
 
   clearTimeout(timer);
   abort.abort(); // stop the other askers
-  if (onDashboard && answer.by !== "dashboard") {
+  if (onDashboard && !["dashboard", "voice"].includes(answer.by)) {
     await control.resolveApproval(id, answer.approved ? "approve" : "deny", answer.by).catch(() => {});
   }
   return answer;

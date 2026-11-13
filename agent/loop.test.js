@@ -20,6 +20,7 @@ const USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 
 // What the fake charger's 402 will claim. Tests change this to simulate an attack.
 let quoteOverrides = {};
+let quotesIssued = 0; // each 402 carries its number, so tests can tell which one was signed
 let charging = false;
 let server;
 let serverUrl;
@@ -45,7 +46,7 @@ before(async () => {
           error: "Payment required",
           resource: { url: `${serverUrl}/devices/charger-001/charge`, description: "test", mimeType: "application/json" },
           accepts: [
-            { scheme: "exact", network: DEVNET, asset: USDC, payTo: MERCHANT, amount: "200000", maxTimeoutSeconds: 60, extra: {}, ...quoteOverrides },
+            { scheme: "exact", network: DEVNET, asset: USDC, payTo: MERCHANT, amount: "200000", maxTimeoutSeconds: 60, extra: { quoteNumber: ++quotesIssued }, ...quoteOverrides },
           ],
         };
         return json(402, paymentRequired, { "PAYMENT-REQUIRED": encodePaymentRequiredHeader(paymentRequired) });
@@ -65,11 +66,14 @@ after(() => server.close());
 /** A fresh low-battery robot, empty audit log and a wallet that counts how often it is asked to sign. */
 function setup({ limits = {}, askHuman = async () => false, llm } = {}) {
   quoteOverrides = {};
+  quotesIssued = 0;
   charging = false;
   const wallet = {
     signCalls: 0,
-    async signPayment() {
+    signedQuoteNumber: null,
+    async signPayment(paymentRequired, requirement) {
       this.signCalls++;
+      this.signedQuoteNumber = requirement.extra.quoteNumber;
       return { "PAYMENT-SIGNATURE": "fake-signed-payment" };
     },
   };
@@ -167,6 +171,50 @@ describe("decision loop", () => {
     const { deps, wallet } = setup({ limits: { approvalThreshold: 100_000n }, askHuman: async () => true });
     const result = await runCycle(deps);
     assert.deepEqual([result.outcome, wallet.signCalls], ["charging", 1]);
+  });
+
+  test("after an approval the agent signs a fresh 402, not the one that sat waiting", async () => {
+    const { deps, wallet } = setup({ limits: { approvalThreshold: 100_000n }, askHuman: async () => true });
+    const result = await runCycle(deps);
+    assert.equal(result.outcome, "charging");
+    assert.deepEqual([quotesIssued, wallet.signedQuoteNumber], [2, 2], "a second 402 was requested and that is the one signed");
+  });
+
+  test("without an approval wait, the first 402 is signed directly", async () => {
+    const { deps, wallet } = setup();
+    await runCycle(deps);
+    assert.deepEqual([quotesIssued, wallet.signedQuoteNumber], [1, 1]);
+  });
+
+  test("charger raises the price while the human is deciding: refused, nothing signed", async () => {
+    const askHuman = async () => {
+      quoteOverrides = { amount: "900000" }; // the next 402 asks for more than was approved
+      return true;
+    };
+    const { deps, wallet } = setup({ limits: { approvalThreshold: 100_000n }, askHuman });
+    const result = await runCycle(deps);
+    assert.equal(result.outcome, "refused");
+    assert.match(result.reasons[0], /requote: the charger changed its payment terms after the approval/);
+    assert.equal(wallet.signCalls, 0);
+  });
+
+  test("charger swaps the recipient while the human is deciding: refused, nothing signed", async () => {
+    const askHuman = async () => {
+      quoteOverrides = { payTo: ATTACKER };
+      return true;
+    };
+    const { deps, wallet } = setup({ limits: { approvalThreshold: 100_000n }, askHuman });
+    const result = await runCycle(deps);
+    assert.deepEqual([result.outcome, wallet.signCalls], ["refused", 0]);
+  });
+
+  test("kill switch flipped while the human is deciding: an approval no longer pays", async () => {
+    const { deps, wallet } = setup({ limits: { approvalThreshold: 100_000n }, askHuman: async () => true });
+    deps.getLimits = () => ({ ...deps.limits, paused: true }); // paused during the wait
+    const result = await runCycle(deps);
+    assert.equal(result.outcome, "refused");
+    assert.match(result.reasons[0], /kill-switch/);
+    assert.equal(wallet.signCalls, 0);
   });
 
   test("the LLM's plan is used when valid", async () => {

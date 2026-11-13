@@ -205,6 +205,28 @@ code,
   color: #fff;
 }
 
+.btn[data-state="on"] {
+  border-color: rgba(57, 135, 229, 0.6);
+  color: #9cc4f3;
+}
+.btn[data-state="muted"] {
+  color: var(--muted);
+}
+.btn-mic {
+  touch-action: none; /* hold-to-talk: don't let a long press scroll or select */
+  user-select: none;
+}
+.btn-mic[data-state="listening"] {
+  background: var(--critical);
+  border-color: var(--critical);
+  color: #fff;
+  animation: pulse 1s ease-in-out infinite;
+}
+.btn-mic[data-state="busy"] {
+  border-color: rgba(250, 178, 25, 0.6);
+  color: #fcd277;
+}
+
 .banner {
   padding: 9px 20px;
   background: var(--critical-soft);
@@ -365,6 +387,28 @@ code,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.speech {
+  margin-top: 14px;
+  padding: 9px 12px;
+  border-radius: 10px 10px 10px 2px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(57, 135, 229, 0.35);
+  color: var(--text);
+  font-size: 13.5px;
+}
+.speech[data-speaking="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(57, 135, 229, 0.18);
+}
+.speech-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #9cc4f3;
 }
 
 .budget {
@@ -670,6 +714,27 @@ code,
   transition: width 0.8s ease;
 }
 
+.heard {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid rgba(57, 135, 229, 0.4);
+  border-radius: 12px;
+  background: var(--accent-soft);
+  animation: rise 0.35s ease;
+}
+.heard .said {
+  color: var(--text);
+  font-style: italic;
+}
+.heard .outcome {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+
 .watching {
   display: flex;
   align-items: center;
@@ -856,6 +921,14 @@ code,
   margin-top: 8px;
   font-size: 12.5px;
   color: var(--muted);
+}
+.modal-mic {
+  width: 100%;
+  margin-top: 16px;
+  padding: 11px;
+}
+.modal-mic + .modal-actions {
+  margin-top: 10px;
 }
 .modal-actions {
   display: grid;

@@ -10,6 +10,8 @@ import { emit } from "./events.js";
 
 let robot = null;
 
+export const getRobot = () => robot;
+
 export function updateRobot(reported) {
   if (reported && typeof reported === "object") robot = { ...reported, lastSeen: new Date().toISOString() };
 }
@@ -73,6 +75,9 @@ export function confirmByStreams(match) {
     sessionId: payment?.sessionId ?? null,
   });
 }
+
+export const lastPayment = () => payments[0] ?? null;
+export const pendingApprovals = () => [...approvals.values()].filter((a) => a.status === "pending");
 
 let lastStreamsDelivery = null;
 export const noteStreamsDelivery = () => (lastStreamsDelivery = new Date().toISOString());
@@ -139,8 +144,9 @@ export function snapshot(devices) {
     robot,
     devices,
     payments,
-    pendingApprovals: [...approvals.values()].filter((a) => a.status === "pending"),
+    pendingApprovals: pendingApprovals(),
     paused: isPaused(),
     streams: { configured: Boolean(config.streamsToken), lastDelivery: lastStreamsDelivery },
+    voice: { enabled: Boolean(config.elevenLabsApiKey), ttsModel: config.ttsModel, sttModel: config.sttModel },
   };
 }
