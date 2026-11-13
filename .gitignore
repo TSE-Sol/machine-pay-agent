@@ -1,6 +1,7 @@
 # Environment / secrets
 .env
 .env.*
+!.env.example
 
 # Dependencies
 node_modules/
@@ -12,5 +13,6 @@ node_modules/
 *.log
 
 # Keypairs / wallets — never commit
+keys/
 *keypair*.json
 wallet*.json
