@@ -13,7 +13,49 @@ scripts/     key generation, test payment client, public tunnel
 keys/        local devnet keypairs (gitignored)
 ```
 
-Quick start: `npm install`, `npm run keys`, copy `.env.example` to `.env` and set `MERCHANT_WALLET`, fund the test payer on devnet, then run `npm run dev` in one terminal and `npm run agent` in another, and open http://localhost:4020 to watch. Details are in the [Server](#server), [Agent](#agent), [Dashboard](#dashboard), [QuickNode Streams](#quicknode-streams), [ElevenLabs](#elevenlabs) and [Solana integration](#solana-integration) sections.
+## Quick start
+
+First time only:
+
+```bash
+npm install
+npm run keys            # creates the devnet keypairs and prints both public keys
+cp .env.example .env    # then set MERCHANT_WALLET (and any API keys you have)
+```
+
+Then fund the test payer on devnet (see [Funding the test wallets](#funding-the-test-wallets-devnet-only)).
+
+### Start everything with one click
+
+On macOS, double-click **`Start Demo.command`** in the repo folder. It opens a Terminal window, starts the server, the public tunnel and the agent, and opens the dashboard in Google Chrome as soon as the server is healthy.
+
+From a terminal, the same thing is:
+
+```bash
+npm run start:all          # server + tunnel + agent in one terminal (permanent tunnel URL)
+npm run start:all:quick    # the same with a throwaway quick tunnel (no Cloudflare setup needed)
+npm run start:all:fresh    # start:all after `demo:reset` (24-hour spend back to zero)
+```
+
+What it does:
+
+- **Starts in order.** The server first; once `GET /health` answers, the tunnel; once the tunnel has its public URL, the agent. Output is prefixed `[server]`, `[tunnel]`, `[agent]`, each in its own color.
+- **Tells you the webhook URL.** When the tunnel is up it prints a banner, `QuickNode Stream destination must be: <url>/streams/webhook`. With the named tunnel that is always `https://pay.sentrumten.com/streams/webhook`, so the Stream is set once and never touched again. It remembers the last URL (in `.cache/`, gitignored); if the new one is different, as it is on every start of a quick tunnel, it prints `⚠ TUNNEL URL CHANGED — update the Stream destination in QuickNode` in red.
+- **Stops together.** If any one of the three stops, the others are stopped and it says which one ended first. Ctrl+C stops everything.
+- **Never disturbs what is already running.** If the port is in use, or a dev server, tunnel or agent is already running, it lists what it found, starts nothing, and leaves it to you to stop them. `start:all:fresh` runs the reset only after that check has passed.
+
+Then open http://localhost:4020 (the launcher does this for you).
+
+### Start the parts separately
+
+```bash
+npm run dev      # server + dashboard, restarts on file changes
+npm run tunnel         # permanent public URL (named tunnel) for the QuickNode Streams webhook
+npm run tunnel:quick   # throwaway trycloudflare.com URL instead
+npm run agent    # the robot
+```
+
+Details are in the [Server](#server), [Agent](#agent), [Dashboard](#dashboard), [QuickNode Streams](#quicknode-streams), [ElevenLabs](#elevenlabs) and [Solana integration](#solana-integration) sections.
 
 ## Server
 
@@ -423,9 +465,36 @@ X-QN-Signature = hex( HMAC-SHA256( key = security token, message = X-QN-Nonce + 
 
 A verified match is then checked against the server's own records: the payment is marked confirmed only if the transaction signature matches a session and the on-chain amount covers its price. The server emits an `onchain_confirmed` event on `/events` either way.
 
+### Named tunnel (permanent URL)
+
+The webhook needs a public URL. A Cloudflare quick tunnel gives a new one on every start, which means editing the Stream each time. This project instead uses a named tunnel, `machine-pay-agent`, with a fixed hostname:
+
+```
+https://pay.sentrumten.com  ->  http://localhost:4020
+```
+
+- **Config in the repo:** [tunnel/config.yml](tunnel/config.yml) holds the tunnel ID, the hostname and the local port. `scripts/tunnel.js` always starts cloudflared with `--config tunnel/config.yml`, so it never reads `~/.cloudflared/config.yml` and cannot collide with another tunnel on the same machine.
+- **Credentials outside the repo:** the tunnel's secret is `~/.cloudflared/<tunnel id>.json`, created by `cloudflared tunnel create`. It is never committed; the script points cloudflared at it.
+- **Same exposure as before:** the whole server is reachable at the public hostname while the tunnel runs. The dashboard is read-only there: approvals, voice commands, the voice picker and the kill switch answer only on localhost.
+
+The tunnel in this repo belongs to the project's own Cloudflare account. To run your own copy, either use the quick tunnel (`npm run start:all:quick`), or make your own named tunnel:
+
+```bash
+cloudflared tunnel login                 # choose the zone your hostname is in
+cloudflared tunnel create my-pay-agent   # prints the tunnel ID and writes ~/.cloudflared/<id>.json
+```
+
+Put the tunnel ID and your hostname in `tunnel/config.yml`, then create a proxied DNS record for the hostname: a `CNAME` pointing at `<tunnel id>.cfargotunnel.com`.
+
+Two things to know before using `cloudflared tunnel route dns` for that record instead of the dashboard:
+
+- It creates the record in the zone you picked at `cloudflared tunnel login`. If the hostname is in a different zone, it silently creates `your.hostname.<login zone>` instead.
+- If `~/.cloudflared/config.yml` exists and belongs to another tunnel, giving the tunnel by name can route to that other tunnel. Always pass the tunnel ID, not its name: `cloudflared tunnel route dns <tunnel id> <hostname>`.
+- With more than one Cloudflare account on the machine, keep one login cert per account and name the one to use. The flag goes before the subcommand: `cloudflared tunnel --origincert ~/.cloudflared/cert-<account>.pem route dns <tunnel id> <hostname>`.
+
 ### Setting up the Stream
 
-1. Run `npm run tunnel` and copy the webhook URL it prints. (It opens a Cloudflare quick tunnel to port 4020. The URL changes each time the tunnel restarts, and a new address can take up to a minute to start resolving.)
+1. Run `npm run tunnel` (or `npm run start:all`) and copy the webhook URL from the banner. With the named tunnel it is always `https://pay.sentrumten.com/streams/webhook`. With `npm run tunnel:quick` the URL is new on every start and can take up to a minute to start resolving.
 2. In the QuickNode dashboard, create a Stream: network **Solana devnet**, dataset **Block**, start at the latest block, batch size 1.
 3. Choose to customize the payload and paste [streams/filter.js](streams/filter.js) into the filter editor.
 4. Destination: **Webhook**, URL from step 1, no compression (gzip also works).
@@ -520,3 +589,7 @@ Where Solana is used:
 - **Independent confirmation**: QuickNode Streams delivers the same transfer from block data ([streams/filter.js](streams/filter.js)).
 
 Example payment: https://explorer.solana.com/tx/4cPw27u5EMD1H9M9YMkXXyZAPx6adacSKB1VnRqLRDcqwyifYzL2shoW3eAwG5cExWquwKefiyayX5xftz83nmes?cluster=devnet
+
+## License
+
+Copyright (c) 2026 Sentrum Ten LLC. All rights reserved. The code is public for review and judging in the UBC 2026 Hackathon only; see [LICENSE](LICENSE).
