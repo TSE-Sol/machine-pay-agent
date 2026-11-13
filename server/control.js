@@ -57,7 +57,9 @@ streamsWebhook.post("/streams/webhook", express.raw({ type: () => true, limit: "
     maxAgeSeconds: config.streamsMaxAgeSeconds,
   });
   if (!verdict.ok) {
-    console.warn(`[STREAMS] webhook rejected: ${verdict.reason}`);
+    // Log header names only (never values) so a rejected delivery can be diagnosed.
+    const seen = Object.keys(req.headers).filter((name) => name.startsWith("x-qn") || name === "content-encoding" || name === "user-agent");
+    console.warn(`[STREAMS] webhook rejected: ${verdict.reason} | ${body.length} bytes | headers present: ${seen.join(", ") || "none of interest"}`);
     return res.status(verdict.status).json({ error: verdict.reason });
   }
 
