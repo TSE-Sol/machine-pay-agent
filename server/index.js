@@ -1,14 +1,20 @@
 // Machine Pay Agent - x402 charger server (simulated pay-to-power stations).
+import { fileURLToPath } from "node:url";
 import express from "express";
 import { ALLOWED_MINUTES, assertConfig, config, explorerUrl } from "./config.js";
+import { control, streamsWebhook } from "./control.js";
 import { deviceStatus, getDevice, isBusy, listDevices, release, reserve, startCharging } from "./devices.js";
 import { sseHandler } from "./events.js";
+import { recordPayment } from "./state.js";
 import { checkPayment, initPayments } from "./x402.js";
 
 assertConfig();
 
 const app = express();
+app.use(streamsWebhook); // before express.json: signature checks need the raw body
 app.use(express.json());
+app.use(control);
+app.use(express.static(fileURLToPath(new URL("../dashboard", import.meta.url)))); // dashboard at GET /
 
 app.get("/health", (req, res) => {
   res.json({ ok: true });
@@ -51,6 +57,15 @@ app.post("/devices/:id/charge", async (req, res) => {
   }
 
   const session = startCharging(device, minutes, settled.txSignature);
+  recordPayment({
+    txSignature: settled.txSignature,
+    deviceId: device.id,
+    sessionId: session.sessionId,
+    minutes,
+    amount: settled.amount,
+    payer: settled.payer,
+    onChainCheck: settled.onChainCheck,
+  });
   res.set(settled.headers).json({
     sessionId: session.sessionId,
     deviceId: session.deviceId,
@@ -71,9 +86,11 @@ try {
 }
 
 app.listen(config.port, () => {
-  console.log(`Charger server listening on http://localhost:${config.port}`);
+  console.log(`Charger server and dashboard on http://localhost:${config.port}`);
   console.log(`  network      ${config.network} (Solana devnet)`);
   console.log(`  merchant     ${config.merchantWallet}`);
   console.log(`  price        ${config.pricePer15MinUsdc.toFixed(2)} USDC per 15 min`);
   console.log(`  facilitator  ${config.facilitatorUrl}`);
+  console.log(`  agent token  ${config.agentEventsToken ? "set" : "NOT SET (agent events, approvals and kill switch are disabled)"}`);
+  console.log(`  streams      ${config.streamsToken ? "security token set" : "QUICKNODE_STREAMS_TOKEN not set (webhooks are rejected)"}`);
 });

@@ -157,7 +157,14 @@ export async function checkPayment(req, charge) {
       onChainCheck: onChain.status,
     });
     // settlement.headers carries PAYMENT-RESPONSE (base64 JSON with the tx signature).
-    return { ok: true, txSignature, payer: settlement.payer, headers: settlement.headers };
+    return {
+      ok: true,
+      txSignature,
+      payer: settlement.payer,
+      amount: paymentRequirements.amount,
+      onChainCheck: onChain.status,
+      headers: settlement.headers,
+    };
   }
 
   return { paid: true, settle };

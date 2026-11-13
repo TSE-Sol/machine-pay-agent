@@ -2,7 +2,8 @@
 //
 //   OBSERVE -> DECIDE -> DISCOVER -> PLAN -> GUARD -> PAY -> VERIFY -> RECORD
 //
-// Every phase prints one console line and (once a charge is needed) one audit-log entry.
+// Every phase prints one console line, is sent to the dashboard with its details, and
+// (once a charge is needed) is written to the audit log.
 // The pass stops early if no charge is needed, a guardrail refuses, or a step fails.
 import { randomUUID } from "node:crypto";
 import { formatUsdc, toBaseUnits } from "./config.js";
@@ -18,12 +19,14 @@ export const explorerUrl = (txSignature) => `https://explorer.solana.com/tx/${tx
 /**
  * deps: { robot, config, limits, charger, wallet, audit, askHuman, log, llm? }
  *   limits  - config.limits with `paused` already resolved for this cycle
- *   log     - (phase, message) => void
+ *   log     - (phase, message, data) => void; data is the structured detail for the dashboard
+ *   askHuman - (question, request) => true/false or { approved, by }
  * Returns { outcome, ... } where outcome is one of:
  *   "no_charge_needed" | "charging" | "refused" | "failed"
  */
-export async function runCycle({ robot, config, limits, charger, wallet, audit, askHuman, log, llm }) {
+export async function runCycle({ robot, config, limits, charger, wallet, audit, askHuman, log: output, llm }) {
   const cycleId = randomUUID().slice(0, 8);
+  const log = (phase, message, data = {}) => output(phase, message, { cycleId, ...data });
   const record = (phase, data = {}) => audit.write({ robotId: robot.id, cycleId, phase, ...data });
   const finish = (outcome, data = {}) => {
     record("RECORD", { outcome, ...data });
@@ -37,23 +40,23 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
   const payments = audit.payments();
   const spent = spentLast24h(payments, now);
   const budgetLeft = limits.dailyBudget > spent ? limits.dailyBudget - spent : 0n;
-  log("OBSERVE", `battery ${state.batteryPct}% | budget left ${formatUsdc(budgetLeft)} USDC`);
+  log("OBSERVE", `battery ${state.batteryPct}% | budget left ${formatUsdc(budgetLeft)} USDC`, { batteryPct: state.batteryPct });
 
   // DECIDE: is a charge needed?
   if (robot.batteryPct >= config.lowBatteryPct) {
-    log("DECIDE", `battery at or above ${config.lowBatteryPct}% → keep delivering`);
+    log("DECIDE", `battery at or above ${config.lowBatteryPct}% → keep delivering`, { chargeNeeded: false });
     return { outcome: "no_charge_needed", cycleId };
   }
   robot.seekCharge();
-  log("DECIDE", `battery below ${config.lowBatteryPct}% → seeking charge`);
+  log("DECIDE", `battery below ${config.lowBatteryPct}% → seeking charge`, { chargeNeeded: true });
   record("OBSERVE", { batteryPct: state.batteryPct, location: state.location, budgetLeft: budgetLeft.toString() });
   record("DECIDE", { chargeNeeded: true, lowBatteryPct: config.lowBatteryPct });
 
   // Kill switch, checked before doing any work. (GUARD checks it again.)
   if (limits.paused) {
     const reason = "kill-switch: agent is paused (AGENT_PAUSED=true); all payments are stopped";
-    log("GUARD", "✗ kill-switch");
-    log("GUARD", `REFUSED — ${reason}`);
+    log("GUARD", "✗ kill-switch", { checks: [{ name: "kill-switch", ok: false, reason }], approval: "not-asked", approved: false });
+    log("REFUSED", reason, { reasons: [reason] });
     return finish("refused", { reasons: [reason] });
   }
 
@@ -62,7 +65,7 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
   try {
     devices = await charger.listDevices();
   } catch (error) {
-    log("DISCOVER", `charger server unreachable (${error.message})`);
+    log("DISCOVER", `charger server unreachable (${error.message})`, { failed: true });
     return finish("failed", { reasons: ["charger server unreachable"] });
   }
   const chargers = devices.map((d) => ({
@@ -73,7 +76,7 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
     priceUsdc: { 15: d.pricePer15MinUSDC, 30: d.pricePer15MinUSDC * 2, 60: d.pricePer15MinUSDC * 4 },
   }));
   const idleCount = chargers.filter((c) => c.status === "idle").length;
-  log("DISCOVER", `${chargers.length} chargers, ${idleCount} idle`);
+  log("DISCOVER", `${chargers.length} chargers, ${idleCount} idle`, { chargers });
   record("DISCOVER", { chargers });
   if (idleCount === 0) return finish("failed", { reasons: ["no idle chargers"] });
 
@@ -88,8 +91,14 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
     },
     { apiKey: config.planner.apiKey, model: config.planner.model, llm },
   );
-  if (plan.note) log("PLAN", `using the rule-based planner (${plan.note})`);
-  log("PLAN", `(${plan.planner}) ${plan.deviceId}, ${plan.minutes} min — "${plan.reason}"`);
+  if (plan.note) log("PLAN", `using the rule-based planner (${plan.note})`, { note: plan.note });
+  log("PLAN", `(${plan.planner}) ${plan.deviceId}, ${plan.minutes} min — "${plan.reason}"`, {
+    planner: plan.planner,
+    model: plan.planner === "claude" ? config.planner.model : null,
+    deviceId: plan.deviceId,
+    minutes: plan.minutes,
+    reason: plan.reason,
+  });
   record("PLAN", plan);
 
   // GUARD: get the charger's real 402 payment request and run every guardrail on it
@@ -99,26 +108,50 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
   const quote = quoted.ok ? quoted.paymentRequired.accepts?.[0] : null;
   if (!quote) {
     const reason = `no usable 402 from ${plan.deviceId} (${quoted.detail ?? "empty accepts list"})`;
-    log("GUARD", reason);
+    log("GUARD", reason, { failed: true });
     return finish("failed", { reasons: [reason] });
   }
 
   const evaluation = evaluatePayment({ quote, expectedAmount, limits, payments, now });
-  const decision = await authorizePayment(evaluation, () =>
-    askHuman(`[GUARD] Approve ${formatUsdc(evaluation.amount)} USDC for ${plan.minutes} min at ${plan.deviceId}?`),
-  );
-  const approvalMark = { "not-needed": "✓ approval-not-needed", granted: "✓ approval-granted", denied: "✗ approval-denied", "not-asked": "– approval-not-asked" };
+  let answeredBy = null; // who answered the approval question: terminal, dashboard or timeout
+  const decision = await authorizePayment(evaluation, async () => {
+    log("GUARD", `waiting for human approval of ${formatUsdc(evaluation.amount)} USDC`, { awaitingApproval: true });
+    const answer = await askHuman(`[GUARD] Approve ${formatUsdc(evaluation.amount)} USDC for ${plan.minutes} min at ${plan.deviceId}?`, {
+      deviceId: plan.deviceId,
+      minutes: plan.minutes,
+      amount: quote.amount,
+      payTo: quote.payTo,
+    });
+    answeredBy = answer?.by ?? null;
+    return answer === true || answer?.approved === true;
+  });
+  const via = answeredBy ? ` (${answeredBy})` : "";
+  const approvalMark = {
+    "not-needed": "✓ approval-not-needed",
+    granted: `✓ approval-granted${via}`,
+    denied: `✗ approval-denied${via}`,
+    "not-asked": "– approval-not-asked",
+  };
   const marks = evaluation.checks.map((check) => `${check.ok ? "✓" : "✗"} ${check.name}`);
-  log("GUARD", [...marks, approvalMark[decision.approval]].join(" "));
+  log("GUARD", [...marks, approvalMark[decision.approval]].join(" "), {
+    checks: evaluation.checks,
+    approval: decision.approval,
+    approvalBy: answeredBy,
+    approved: decision.approved,
+    amount: quote.amount,
+    deviceId: plan.deviceId,
+    minutes: plan.minutes,
+  });
   record("GUARD", {
     quote: { scheme: quote.scheme, network: quote.network, asset: quote.asset, payTo: quote.payTo, amount: quote.amount },
     expectedAmount: expectedAmount.toString(),
     checks: evaluation.checks,
     approval: decision.approval,
+    approvalBy: answeredBy,
     approved: decision.approved,
   });
   if (!decision.approved) {
-    for (const reason of decision.reasons) log("GUARD", `REFUSED — ${reason}`);
+    for (const reason of decision.reasons) log("REFUSED", reason, { reasons: decision.reasons });
     return finish("refused", { reasons: decision.reasons });
   }
 
@@ -132,7 +165,7 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
     paymentHeaders = await wallet.signPayment(quoted.paymentRequired, quote);
   } catch (error) {
     record("PAY", { ...payment, status: "failed", error: error.message }); // nothing was sent
-    log("PAY", `could not sign the payment: ${error.message}`);
+    log("PAY", `could not sign the payment: ${error.message}`, { failed: true });
     return finish("failed", { reasons: [`signing failed: ${error.message}`] });
   }
 
@@ -142,7 +175,7 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
   } catch (error) {
     // The request may or may not have reached the server. The payment stays "pending",
     // which still counts against the budget.
-    log("PAY", `no response from the charger (${error.message}); payment state unknown`);
+    log("PAY", `no response from the charger (${error.message}); payment state unknown`, { failed: true });
     return finish("failed", { reasons: ["no response after sending payment"] });
   }
 
@@ -152,12 +185,13 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
     const why = result.body?.error ?? result.receipt?.errorReason ?? "no successful PAYMENT-RESPONSE";
     // 4xx means the server did not take the payment. On 5xx we can't be sure, so it stays pending.
     if (result.status >= 400 && result.status < 500) record("PAY", { ...payment, status: "failed", error: why });
-    log("PAY", `payment not accepted (HTTP ${result.status}: ${why})`);
+    log("PAY", `payment not accepted (HTTP ${result.status}: ${why})`, { failed: true });
     return finish("failed", { reasons: [`payment not accepted: ${why}`] });
   }
   record("PAY", { ...payment, status: "settled", txSignature });
-  log("PAY", `${formatUsdc(quote.amount)} USDC → sig ${shorten(txSignature)}`);
-  log("PAY", explorerUrl(txSignature));
+  const paid = { amount: quote.amount, deviceId: plan.deviceId, minutes: plan.minutes, txSignature, explorerUrl: explorerUrl(txSignature) };
+  log("PAY", `${formatUsdc(quote.amount)} USDC → sig ${shorten(txSignature)}`, paid);
+  log("PAY", explorerUrl(txSignature), { link: true });
 
   // VERIFY (part 2): poll the charger until it reports "charging"
   let status = null;
@@ -166,18 +200,22 @@ export async function runCycle({ robot, config, limits, charger, wallet, audit, 
     status = await charger.getStatus(plan.deviceId).catch(() => null);
   }
   if (status?.status !== "charging") {
-    log("VERIFY", `✗ paid, but ${plan.deviceId} is not charging`);
+    log("VERIFY", `✗ paid, but ${plan.deviceId} is not charging`, { deviceId: plan.deviceId, charging: false, failed: true });
     record("VERIFY", { deviceId: plan.deviceId, charging: false, txSignature });
     return finish("failed", { reasons: ["paid but charger did not turn on"], txSignature });
   }
-  log("VERIFY", `${plan.deviceId} charging until ${clock(status.expiresAt)}`);
+  log("VERIFY", `${plan.deviceId} charging until ${clock(status.expiresAt)}`, { deviceId: plan.deviceId, charging: true, expiresAt: status.expiresAt });
   record("VERIFY", { deviceId: plan.deviceId, charging: true, sessionId: status.sessionId, expiresAt: status.expiresAt });
 
   robot.startCharging({ deviceId: plan.deviceId, location: device.location, minutes: plan.minutes, expiresAt: status.expiresAt });
 
   // RECORD: the cycle's outcome
   const spentNow = spent + evaluation.amount;
-  log("RECORD", `paid ${formatUsdc(evaluation.amount)} USDC | 24h spend ${formatUsdc(spentNow)} of ${formatUsdc(limits.dailyBudget)} USDC | audit log updated`);
+  log("RECORD", `paid ${formatUsdc(evaluation.amount)} USDC | 24h spend ${formatUsdc(spentNow)} of ${formatUsdc(limits.dailyBudget)} USDC | audit log updated`, {
+    outcome: "charging",
+    amount: quote.amount,
+    txSignature,
+  });
   return finish("charging", {
     deviceId: plan.deviceId,
     minutes: plan.minutes,

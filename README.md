@@ -7,12 +7,13 @@ An autonomous payment agent for machines. A simulated delivery robot notices its
 ```
 server/      x402 charger server (simulated pay-to-power stations)   <- built
 agent/       the robot and its payment agent                          <- built
-dashboard/   live dashboard                                           <- later
-scripts/     key generation and a test payment client
+dashboard/   live dashboard, served by the server at /               <- built
+streams/     QuickNode Streams filter function
+scripts/     key generation, test payment client, public tunnel
 keys/        local devnet keypairs (gitignored)
 ```
 
-Quick start: `npm install`, `npm run keys`, copy `.env.example` to `.env` and set `MERCHANT_WALLET`, fund the test payer on devnet, then run `npm run dev` in one terminal and `npm run agent` in another. Details are in the [Server](#server) and [Agent](#agent) sections.
+Quick start: `npm install`, `npm run keys`, copy `.env.example` to `.env` and set `MERCHANT_WALLET`, fund the test payer on devnet, then run `npm run dev` in one terminal and `npm run agent` in another, and open http://localhost:4020 to watch. Details are in the [Server](#server), [Agent](#agent), [Dashboard](#dashboard), [QuickNode Streams](#quicknode-streams) and [Solana integration](#solana-integration) sections.
 
 ## Server
 
@@ -42,6 +43,8 @@ To make a real test payment, fund the test payer on **Solana devnet** (see below
 | `PRICE_USDC_PER_15MIN` | `0.20` | Price of 15 minutes of charging |
 | `FACILITATOR_URL` | `https://x402.org/facilitator` | Optional. x402 facilitator that verifies and settles payments |
 | `DEMO_SECONDS_PER_MINUTE` | `60` | Optional. Set to `1` so a 15-minute session ends after 15 seconds |
+| `AGENT_EVENTS_TOKEN` | (none) | Shared secret for the agent's event feed and the dashboard's controls. Generate one with `openssl rand -hex 24`. Without it those routes are disabled |
+| `QUICKNODE_STREAMS_TOKEN` | (none) | Security token of the QuickNode Stream. Without it every Streams webhook is rejected |
 
 ### Endpoints
 
@@ -52,6 +55,14 @@ To make a real test payment, fund the test payer on **Solana devnet** (see below
 | POST | `/devices/:id/charge` | Body `{ "minutes": 15 }` (15, 30 or 60). Unpaid: `402` with payment requirements. Paid: turns the charger on and returns `{ sessionId, deviceId, minutes, expiresAt, txSignature, explorerUrl }` |
 | GET | `/devices/:id/status` | Current state and `secondsRemaining` |
 | GET | `/events` | Server-Sent Events stream of everything that happens |
+| GET | `/` | The dashboard |
+| GET | `/state` | Snapshot for the dashboard: robot, chargers, payments, pending approvals, kill switch |
+| POST | `/agent/events` | Agent posts each phase event and its state; rebroadcast on `/events`. Needs the token |
+| POST | `/agent/approvals`, `/agent/approvals/:id` | Create an approval request (agent) and answer it with `approve` or `deny` (dashboard). Needs the token |
+| POST | `/agent/pause` | Kill switch on or off. Needs the token |
+| POST | `/streams/webhook` | QuickNode Streams destination. Needs a valid QuickNode signature |
+
+"Needs the token" means the header `Authorization: Bearer <AGENT_EVENTS_TOKEN>`.
 
 Other responses from the charge endpoint: `400` (bad `minutes` or malformed payment header), `404` (unknown charger), `409` (charger busy, or a payment that was already used), `502` (facilitator unreachable).
 
@@ -168,19 +179,19 @@ All limits are enforced in [agent/guardrails.js](agent/guardrails.js) and tested
 
 | Guardrail | Setting (default) | What it checks | When it trips |
 | --- | --- | --- | --- |
-| Kill switch | `AGENT_PAUSED` (`false`) | Is the agent allowed to pay at all? | All payments stop. Also trips while a file named `agent/PAUSED` exists, so a running agent can be paused without a restart. |
+| Kill switch | `AGENT_PAUSED` (`false`) | Is the agent allowed to pay at all? | All payments stop. Also trips while a file named `agent/PAUSED` exists, so a running agent can be paused without a restart. The dashboard's "Pause payments" button creates and removes that file. |
 | Allowlist | `MERCHANT_WALLET`, Solana devnet, `USDC_MINT` (or `ALLOWED_PAY_TO` for several wallets) | The 402's recipient, network, token and scheme are all ones the agent is configured to pay. | Refused, even though the server asked for it. Stops a 402 that redirects funds to another wallet, chain or token. |
 | Price sanity | advertised price on `/devices` | The 402 amount equals the advertised price for the planned minutes, exactly. | Refused. Stops a 402 that asks for more than the listed price. |
 | Per-payment cap | `MAX_PER_TX_USDC` (`1.00`) | The single payment is not above the cap. | Refused. |
 | Daily budget | `DAILY_BUDGET_USDC` (`5.00`) | This payment plus everything paid in the last 24 hours (from the audit log) stays within the budget. | Refused until earlier payments age out. |
 | Rate limit | `MAX_PAYMENTS_PER_10_MIN` (`5`) | Fewer than N payments in the last 10 minutes. | Refused until the window clears. |
-| Human approval | `APPROVAL_THRESHOLD_USDC` (`0.50`) | Any single payment above the threshold. | The agent pauses and asks `y/N` in the terminal. Only an explicit yes continues; no answer, or no interactive terminal, means no. A human cannot approve a payment that another guardrail refused. |
+| Human approval | `APPROVAL_THRESHOLD_USDC` (`0.50`) | Any single payment above the threshold. | The agent pauses and asks in two places at once: `y/N` in the terminal and Approve / Deny on the dashboard. The first answer wins. Only an explicit yes continues; no answer within 60 seconds means no. A human cannot approve a payment that another guardrail refused. |
 
 After a refusal the agent waits `AGENT_RETRY_SECONDS` (default 20) and tries again from OBSERVE. Example with `MAX_PER_TX_USDC=0.10`:
 
 ```
 [GUARD] ✓ kill-switch ✓ allowlist ✓ price ✗ per-tx ✓ daily ✓ rate-limit – approval-not-asked
-[GUARD] REFUSED — per-tx: 0.20 USDC is over the 0.10 USDC per-payment limit (MAX_PER_TX_USDC)
+[REFUSED] per-tx: 0.20 USDC is over the 0.10 USDC per-payment limit (MAX_PER_TX_USDC)
 [RECORD] no payment made (refused); next attempt in 20s
 ```
 
@@ -202,6 +213,8 @@ Further protections around the guardrails:
 | `TARGET_BATTERY_PCT` | `45` | Battery level a session should reach |
 | `AGENT_WALLET_PATH` | `keys/test-payer.json` | Keypair the robot pays from |
 | `AGENT_MAX_CYCLES` | `0` | Stop after this many charge attempts (0 = run until stopped) |
+| `AGENT_EVENTS_TOKEN` | (none) | Same value as the server's. Lets the agent send events to the dashboard and take approvals from it |
+| `AGENT_CONTROL_URL` | same as `CHARGER_SERVER_URL` | Where the dashboard backend lives |
 | `ROBOT_START_BATTERY_PCT`, `ROBOT_DRAIN_PCT_PER_SEC`, `ROBOT_CHARGE_PCT_PER_MIN` | `35`, `0.5`, `2` | Robot simulation |
 
 The guardrail settings are listed in the table above.
@@ -216,3 +229,206 @@ Today the agent holds a devnet keypair (`keys/test-payer.json`) and pays from it
 4. The owner can end this at any time with a single `revoke`, or raise or lower the cap with a new `approve`.
 
 That makes the on-chain allowance a hard limit beneath the software guardrails in this repo. It is not implemented yet.
+
+## Dashboard
+
+One screen that shows the whole system live. The server serves it at http://localhost:4020 (plain HTML, CSS and JavaScript in [dashboard/](dashboard/), no build step).
+
+```bash
+npm run dev      # server + dashboard
+npm run agent    # the robot; its decisions appear on the dashboard as they happen
+```
+
+Both need the same `AGENT_EVENTS_TOKEN` in `.env`.
+
+| Panel | What it shows |
+| --- | --- |
+| Robot | Animated battery gauge, status (delivering, seeking charge, charging), 24-hour budget used and left, and which planner is in use |
+| Chargers | The three Austin chargers with price and status; a charging dock shows a countdown. A small OpenStreetMap map shows the docks and the robot |
+| Agent decision feed | Each charge decision as a card, phase by phase. The planner's reason is highlighted, and every guardrail is a green ✓ or red ✗ chip (hover a chip for the reason). Quiet checks collapse into one line |
+| Payments | Each payment with amount, charger, Solana Explorer link and two confirmation badges: "Facilitator settled" and "QuickNode Streams confirmed" |
+| Approval dialog | Appears when the agent asks for human approval, with a 60-second countdown and Approve / Deny |
+| Kill switch | "Pause payments" in the top bar. While paused, the agent refuses every payment |
+
+How it is wired:
+
+- The agent posts every phase event and its state to `POST /agent/events`. The server rebroadcasts them on the `/events` Server-Sent Events stream, which the dashboard listens to. Reporting is best effort: if the dashboard is down, the agent keeps working.
+- For an approval, the agent creates a request on the server and waits for the terminal, the dashboard or the 60-second timeout, whichever comes first.
+- Approve, Deny and the kill switch need `AGENT_EVENTS_TOKEN`. The page gets the token only when it is opened on `localhost`; through the public tunnel the dashboard is read-only.
+
+In this repo the dashboard backend and the charger server are one process, to keep the demo to two commands. In production they would be separate: the approval and kill-switch service belongs to the robot's owner, not to the merchant being paid. `AGENT_CONTROL_URL` exists for that split. Every other guardrail runs inside the agent and does not depend on the server.
+
+## QuickNode Streams
+
+Every payment is confirmed twice, by two independent sources. The x402 facilitator says "settled" in its HTTP response. Separately, a QuickNode Stream watches Solana devnet and pushes each USDC transfer into the merchant's token account to this server, straight from block data. When the two agree, the payment's second badge lights up on the dashboard.
+
+| | |
+| --- | --- |
+| **Network** | Solana devnet |
+| **Dataset** | Block (full blocks with all transactions) |
+| **Filter** | [streams/filter.js](streams/filter.js): keep only successful transactions that move the devnet USDC mint into a token account owned by the merchant wallet |
+| **Payload** | `[{ signature, slot, blockTime, from, to, amountUSDC }]` per batch, and nothing at all for batches with no match |
+| **Destination** | Webhook: `POST https://<public-host>/streams/webhook` (JSON) |
+| **Security** | Every delivery is signed with the Stream's security token; unsigned or wrongly signed requests are rejected |
+
+### Why Streams
+
+- **Independent on-chain truth.** The facilitator is the party that submits the payment, so its "settled" is a claim about its own work. Streams reports what actually landed in a block, from a different provider, through a different path.
+- **No polling.** The server never asks "has it landed yet?". QuickNode pushes each matching transaction once, as its block is produced. One paid session costs zero RPC calls for confirmation.
+- **Filtering happens at the source.** A devnet block holds many transactions; the filter runs inside QuickNode and sends only the payments to this merchant, a few hundred bytes each.
+- **It catches what the server didn't initiate.** A payment that reached the merchant some other way still shows up, flagged as "no matching session".
+
+### Filter logic
+
+For each transaction in each block, the filter skips failures, then compares `meta.preTokenBalances` with `meta.postTokenBalances`. If the USDC balance of a token account owned by the merchant went up, the transaction is a match: the increase is the amount, the owner of the account whose USDC went down is the sender, and the merchant's token account is the recipient. Working from balance changes (instead of decoding instructions) catches every kind of transfer, including ones made inside another program's call.
+
+The full filter, as pasted into QuickNode:
+
+```js
+// QuickNode Streams filter for Machine Pay Agent.
+// Paste this whole file into the Stream's filter editor ("Customize your payload").
+//
+//   Network:  Solana devnet
+//   Dataset:  Block (full blocks with all transactions)
+//   Keeps:    successful transactions that move devnet USDC into the merchant wallet's
+//             USDC token account
+//   Sends:    [{ signature, slot, blockTime, from, to, amountUSDC }]  (nothing if no match)
+//
+// If the merchant wallet changes, update MERCHANT_WALLET below and in .env.
+
+const USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"; // Circle USDC on devnet
+const MERCHANT_WALLET = "AsCyNEGaHqxeyoJQkW5AXdDeTJpN9SiPviWY8sNiVG5w"; // charger owner
+const USDC_DECIMALS = 6;
+
+function main(stream) {
+  const blocks = Array.isArray(stream.data) ? stream.data : [stream.data];
+  const metadata = stream.metadata || {};
+  const matches = [];
+
+  for (const block of blocks) {
+    if (!block || !Array.isArray(block.transactions)) continue;
+
+    // A Solana block does not carry its own slot. With batch size 1 the batch range is
+    // the slot; otherwise fall back to the parent slot + 1.
+    const slot =
+      block.slot !== undefined
+        ? block.slot
+        : blocks.length === 1 && metadata.batch_start_range !== undefined
+          ? Number(metadata.batch_start_range)
+          : block.parentSlot + 1;
+
+    for (const tx of block.transactions) {
+      if (!tx.meta || tx.meta.err) continue; // failed transactions moved nothing
+
+      // USDC balance of every token account this transaction touched, before and after.
+      const before = usdcBalances(tx.meta.preTokenBalances);
+      const after = usdcBalances(tx.meta.postTokenBalances);
+
+      // How much USDC arrived in token accounts owned by the merchant wallet?
+      let received = 0;
+      let merchantAccountIndex = null;
+      for (const index in after) {
+        if (after[index].owner !== MERCHANT_WALLET) continue;
+        const delta = after[index].amount - (before[index] ? before[index].amount : 0);
+        if (delta > 0) {
+          received += delta;
+          merchantAccountIndex = Number(index);
+        }
+      }
+      if (received <= 0) continue;
+
+      // The sender is the owner of the token account whose USDC went down the most.
+      let from = null;
+      let largestDrop = 0;
+      for (const index in before) {
+        const drop = before[index].amount - (after[index] ? after[index].amount : 0);
+        if (drop > largestDrop) {
+          largestDrop = drop;
+          from = before[index].owner;
+        }
+      }
+
+      matches.push({
+        signature: tx.transaction.signatures[0],
+        slot: slot,
+        blockTime: block.blockTime,
+        from: from,
+        to: accountAddress(tx, merchantAccountIndex) || MERCHANT_WALLET, // the merchant's USDC token account
+        amountUSDC: received / Math.pow(10, USDC_DECIMALS),
+      });
+    }
+  }
+
+  return matches.length ? matches : null; // null = send nothing for this batch
+}
+
+// { accountIndex: { owner, amount } } for the USDC mint only. Amounts are in base units.
+function usdcBalances(tokenBalances) {
+  const byIndex = {};
+  for (const balance of tokenBalances || []) {
+    if (balance.mint !== USDC_MINT) continue;
+    byIndex[balance.accountIndex] = { owner: balance.owner, amount: Number(balance.uiTokenAmount.amount) };
+  }
+  return byIndex;
+}
+
+// Address of the account at `index`: static keys first, then keys loaded from lookup tables.
+function accountAddress(tx, index) {
+  if (index === null) return null;
+  const loaded = tx.meta.loadedAddresses || {};
+  const keys = (tx.transaction.message.accountKeys || []).concat(loaded.writable || [], loaded.readonly || []);
+  const key = keys[index];
+  return key && typeof key === "object" ? key.pubkey : key || null;
+}
+```
+
+`npm test` runs this exact file against a real devnet block that contains one of this project's payments ([streams/fixtures/devnet-block.json](streams/fixtures/devnet-block.json)).
+
+### Webhook security
+
+QuickNode signs every delivery. The server ([server/streams.js](server/streams.js)) recomputes the signature and rejects anything that doesn't match:
+
+```
+X-QN-Signature = hex( HMAC-SHA256( key = security token, message = X-QN-Nonce + X-QN-Timestamp + body ) )
+```
+
+- Missing `X-QN-*` headers, a wrong signature, or a body changed after signing: `401`.
+- A signature older than 15 minutes (`STREAMS_MAX_AGE_SECONDS`), or a nonce seen before: `401`.
+- No `QUICKNODE_STREAMS_TOKEN` configured: `503`. The endpoint never accepts unverified data.
+- The comparison is constant-time, and the body is verified exactly as received (after gzip decompression).
+
+A verified match is then checked against the server's own records: the payment is marked confirmed only if the transaction signature matches a session and the on-chain amount covers its price. The server emits an `onchain_confirmed` event on `/events` either way.
+
+### Setting up the Stream
+
+1. Run `npm run tunnel` and copy the webhook URL it prints. (It opens a Cloudflare quick tunnel to port 4020. The URL changes each time the tunnel restarts, and a new address can take up to a minute to start resolving.)
+2. In the QuickNode dashboard, create a Stream: network **Solana devnet**, dataset **Block**, start at the latest block, batch size 1.
+3. Choose to customize the payload and paste [streams/filter.js](streams/filter.js) into the filter editor.
+4. Destination: **Webhook**, URL from step 1, no compression (gzip also works).
+5. Copy the Stream's **security token** into `.env` as `QUICKNODE_STREAMS_TOKEN` and restart the server.
+6. Start the Stream, then run `npm run agent`. Within a few seconds of a payment the "QuickNode Streams confirmed" badge lights up.
+
+## Solana integration
+
+Everything runs on **Solana devnet**. **No custom program is deployed**: payments use existing Solana programs only.
+
+| What | Address | Role |
+| --- | --- | --- |
+| Network | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | Solana devnet, in the CAIP-2 form x402 v2 uses |
+| USDC mint (devnet) | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | Circle's devnet USDC; the only token the agent will pay with |
+| SPL Token program | `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` | Executes the `TransferChecked` instruction that moves the USDC |
+| Associated Token Account program | `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL` | Derives (and once, creates) the payer's and merchant's USDC token accounts |
+| Merchant wallet | `AsCyNEGaHqxeyoJQkW5AXdDeTJpN9SiPviWY8sNiVG5w` | Charger owner; `payTo` in every 402 |
+| Merchant USDC token account | `FJaeXfKpRaXRWH92rcFrhwMp955ebAydPPZJPt5nJ5fu` | Where the USDC lands; what the Stream filter watches |
+| x402 facilitator fee payer | `CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5` | Co-signs each payment and pays its network fee (x402.org facilitator; advertised in each 402 as `extra.feePayer`) |
+| Robot wallet | `7cpH5zEAFUJTszSLXk3Uz5qedVkmxE2RJwbPHZbRM9hH` | The agent's devnet keypair; signs as the token owner |
+
+Each payment is one transaction with three instructions: a compute budget setting (Compute Budget program), one SPL Token `TransferChecked` of USDC from the robot's token account to the merchant's, and a memo (Memo program). It carries two signatures: the robot's, as owner of the USDC, and the facilitator's, as fee payer. The robot therefore needs no SOL to pay.
+
+Where Solana is used:
+
+- **Payment rail**: USDC over SPL Token, requested and settled through x402's `exact` scheme ([server/x402.js](server/x402.js), [agent/wallet.js](agent/wallet.js)).
+- **Server-side check**: after settlement the server reads the transaction over RPC and confirms the merchant's USDC balance change ([server/solana.js](server/solana.js)).
+- **Independent confirmation**: QuickNode Streams delivers the same transfer from block data ([streams/filter.js](streams/filter.js)).
+
+Example payment: https://explorer.solana.com/tx/4cPw27u5EMD1H9M9YMkXXyZAPx6adacSKB1VnRqLRDcqwyifYzL2shoW3eAwG5cExWquwKefiyayX5xftz83nmes?cluster=devnet

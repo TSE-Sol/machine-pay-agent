@@ -19,6 +19,8 @@ export function getDevice(id) {
   return devices.get(id);
 }
 
+export const allDevices = () => [...devices.values()];
+
 /** Discovery view of every charger (GET /devices). */
 export function listDevices() {
   return [...devices.values()].map((d) => ({
@@ -44,6 +46,8 @@ export function deviceStatus(device) {
     sessionId: session?.sessionId ?? null,
     expiresAt: session?.expiresAt ?? null,
     secondsRemaining,
+    txSignature: session?.txSignature ?? null,
+    confirmedByStreams: session?.confirmedByStreams ?? false,
   };
 }
 
@@ -74,6 +78,7 @@ export function startCharging(device, minutes, txSignature) {
     minutes,
     expiresAt: new Date(Date.now() + durationMs).toISOString(),
     txSignature,
+    confirmedByStreams: false, // set when QuickNode Streams delivers the payment from the chain
   };
   device.reserved = false;
   device.status = "charging";
@@ -82,6 +87,12 @@ export function startCharging(device, minutes, txSignature) {
 
   emit("charging_started", { deviceId: device.id, sessionId: session.sessionId, minutes, expiresAt: session.expiresAt });
   return session;
+}
+
+/** QuickNode Streams saw this session's payment on-chain. */
+export function markSessionConfirmed(deviceId, sessionId) {
+  const session = devices.get(deviceId)?.session;
+  if (session && session.sessionId === sessionId) session.confirmedByStreams = true;
 }
 
 function stopCharging(device) {

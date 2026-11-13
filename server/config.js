@@ -21,6 +21,12 @@ export const config = {
   facilitatorUrl: env.FACILITATOR_URL ?? "https://x402.org/facilitator",
   // x402 v2 names networks with CAIP-2 ids. This one is Solana devnet.
   network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+  // Shared secret for the agent's event feed and the dashboard's controls (approve, deny, pause).
+  agentEventsToken: env.AGENT_EVENTS_TOKEN ?? "",
+  // QuickNode Streams security token: used to verify the signature on every webhook.
+  streamsToken: env.QUICKNODE_STREAMS_TOKEN ?? "",
+  // Reject Streams webhooks signed longer ago than this (0 turns the age check off).
+  streamsMaxAgeSeconds: Number(env.STREAMS_MAX_AGE_SECONDS ?? 900),
   // Real seconds per paid "minute". Leave at 60; lower it (e.g. 1) for quick demos.
   secondsPerMinute: Number(env.DEMO_SECONDS_PER_MINUTE ?? 60),
 };

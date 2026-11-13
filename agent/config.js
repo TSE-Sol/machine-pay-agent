@@ -23,6 +23,11 @@ export const config = {
   auditLogPath: env.AGENT_AUDIT_LOG ?? "agent/audit.log",
   pauseFilePath: "agent/PAUSED",
 
+  // Dashboard / control plane: where phase events go and where approvals are answered.
+  controlUrl: env.AGENT_CONTROL_URL ?? env.CHARGER_SERVER_URL ?? `http://localhost:${env.PORT ?? 4020}`,
+  eventsToken: env.AGENT_EVENTS_TOKEN ?? "",
+  approvalTimeoutSeconds: num("APPROVAL_TIMEOUT_SECONDS", 60),
+
   robot: {
     id: "robot-01",
     location: { lat: 30.2747, lng: -97.7404 }, // Texas State Capitol, downtown Austin

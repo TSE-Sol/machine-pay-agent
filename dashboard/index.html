@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Machine Pay Agent</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="1" y="1" width="30" height="30" rx="9" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M17.5 6 9 18h6l-1.5 8L22 14h-6z" fill="currentColor" />
+        </svg>
+        <div>
+          <h1>Machine Pay Agent</h1>
+          <p>A delivery robot that buys its own power · x402 on Solana devnet</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="conn" class="pill" data-state="connecting"><span class="dot"></span><span class="label">Connecting</span></span>
+        <button id="killSwitch" class="btn btn-danger" type="button" disabled>Pause payments</button>
+      </div>
+    </header>
+
+    <div id="pausedBanner" class="banner" hidden>
+      <strong>Payments paused.</strong> The kill switch is on: the agent will refuse every payment until it is resumed.
+    </div>
+
+    <main class="grid">
+      <section class="column">
+        <article class="card" aria-labelledby="robotTitle">
+          <header class="card-head">
+            <h2 id="robotTitle">Robot</h2>
+            <span id="robotStatus" class="pill" data-state="offline"><span class="dot"></span><span class="label">Offline</span></span>
+          </header>
+          <div class="robot-body">
+            <div class="gauge" id="gauge" data-level="unknown">
+              <svg viewBox="0 0 140 140" role="img" aria-labelledby="gaugeLabel">
+                <title id="gaugeLabel">Battery level</title>
+                <circle class="gauge-track" cx="70" cy="70" r="58" />
+                <circle class="gauge-fill" id="gaugeFill" cx="70" cy="70" r="58" transform="rotate(-90 70 70)" />
+              </svg>
+              <div class="gauge-center">
+                <div class="gauge-value"><span id="batteryValue">–</span><small>%</small></div>
+                <div class="gauge-caption" id="batteryCaption">battery</div>
+              </div>
+            </div>
+            <dl class="facts">
+              <div>
+                <dt>Robot</dt>
+                <dd id="robotId">–</dd>
+              </div>
+              <div>
+                <dt>Planner</dt>
+                <dd id="planner">–</dd>
+              </div>
+              <div>
+                <dt>Wallet</dt>
+                <dd id="wallet" class="mono">–</dd>
+              </div>
+            </dl>
+          </div>
+          <div class="budget">
+            <div class="budget-head">
+              <span>Budget, last 24 h</span>
+              <span id="budgetTotal" class="muted">–</span>
+            </div>
+            <div class="meter" role="img" aria-label="Budget used"><div class="meter-fill" id="budgetFill"></div></div>
+            <div class="budget-foot">
+              <span><strong id="budgetUsed">–</strong> used</span>
+              <span><strong id="budgetLeft">–</strong> left</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="card" aria-labelledby="chargersTitle">
+          <header class="card-head">
+            <h2 id="chargersTitle">Chargers</h2>
+            <span class="muted small">Austin, Texas</span>
+          </header>
+          <ul id="chargers" class="charger-list"></ul>
+          <div id="map" class="map" aria-label="Map of chargers and the robot"></div>
+        </article>
+      </section>
+
+      <section class="column column-wide">
+        <article class="card card-fill" aria-labelledby="feedTitle">
+          <header class="card-head">
+            <h2 id="feedTitle">Agent decision feed</h2>
+            <span class="muted small">Observe → Decide → Discover → Plan → Guard → Pay → Verify → Record</span>
+          </header>
+          <div id="feed" class="feed">
+            <p class="empty" id="feedEmpty">Waiting for the agent. Start it with <code>npm run agent</code>.</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="column">
+        <article class="card card-fill" aria-labelledby="paymentsTitle">
+          <header class="card-head">
+            <h2 id="paymentsTitle">Payments</h2>
+            <span id="streamsState" class="muted small"></span>
+          </header>
+          <ul id="payments" class="payment-list">
+            <li class="empty" id="paymentsEmpty">No payments yet.</li>
+          </ul>
+        </article>
+      </section>
+    </main>
+
+    <footer class="footer">Built at UBC 2026 Hackathon · x402 on Solana devnet</footer>
+
+    <dialog id="approvalModal" class="modal" aria-labelledby="approvalTitle">
+      <p class="modal-kicker">Human approval needed</p>
+      <h2 id="approvalTitle">Approve this payment?</h2>
+      <p class="modal-amount"><span id="approvalAmount">–</span> <small>USDC</small></p>
+      <dl class="modal-facts">
+        <div>
+          <dt>Charger</dt>
+          <dd id="approvalCharger">–</dd>
+        </div>
+        <div>
+          <dt>Session</dt>
+          <dd id="approvalMinutes">–</dd>
+        </div>
+        <div>
+          <dt>Pays to</dt>
+          <dd id="approvalPayTo" class="mono">–</dd>
+        </div>
+      </dl>
+      <div class="modal-timer"><div id="approvalTimerFill"></div></div>
+      <p class="modal-note" id="approvalNote">No answer means no.</p>
+      <div class="modal-actions">
+        <button id="denyButton" class="btn" type="button">Deny</button>
+        <button id="approveButton" class="btn btn-primary" type="button">Approve</button>
+      </div>
+    </dialog>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
