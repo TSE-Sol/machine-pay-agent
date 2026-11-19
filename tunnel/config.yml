@@ -1,0 +1,16 @@
+# Cloudflare named tunnel for Machine Pay Agent: a permanent public URL for the local server.
+#
+#   https://pay.sentrumten.com  ->  http://localhost:4020
+#
+# Used only by this repo (scripts/tunnel.js passes it with --config), so it cannot collide
+# with any other tunnel's config in ~/.cloudflared.
+#
+# The tunnel ID below is not a secret (it is visible in the hostname's public DNS record).
+# The tunnel's credentials are: ~/.cloudflared/<tunnel id>.json. That file is the secret,
+# it lives outside the repo, and scripts/tunnel.js points cloudflared at it.
+tunnel: 7fc0a15c-c15e-4fcf-a000-fa62b0689472
+
+ingress:
+  - hostname: pay.sentrumten.com
+    service: http://localhost:4020
+  - service: http_status:404

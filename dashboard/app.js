@@ -28,6 +28,7 @@ const state = {
   robot: null,
   robotSeenAt: 0,
   devices: [],
+  secondsPerMinute: 60, // real seconds per simulated minute, from the server
   payments: [],
   approval: null,
   paused: false,
@@ -94,20 +95,31 @@ function countdown(expiresAt) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+/** Simulated minutes until a busy charger is free, counted down locally between snapshots. */
+function minutesLeft(device) {
+  if (!device.freeAt) return device.minutesUntilFree ?? 0;
+  return Math.max(0, Math.ceil((Date.parse(device.freeAt) - Date.now()) / (state.secondsPerMinute * 1000)));
+}
+
+/** A charger is idle (green), in use by another robot (amber), or charging the robot that paid (blue). */
+function chargerLabel(device) {
+  if (device.status === "charging") {
+    const robot = String(device.occupancy ?? "").replace(/^charging_?/, "") || "robot";
+    return `Charging ${robot} · ${countdown(device.expiresAt)}`;
+  }
+  if (device.status === "in_use") return `In use · ${minutesLeft(device)} min left`;
+  return "Idle";
+}
+
 function renderChargers() {
   $("chargers").replaceChildren(
     ...state.devices.map((device) => {
-      const charging = device.status === "charging";
+      const pill = { charging: "charger-charging", in_use: "charger-in-use" }[device.status] ?? "charger-idle";
       return el(
         "li",
         { class: "charger", "data-status": device.status },
         el("div", {}, el("div", { class: "charger-name", text: device.name }), el("div", { class: "charger-meta", text: `${device.id} · ${device.pricePer15MinUSDC.toFixed(2)} USDC / 15 min` })),
-        el(
-          "span",
-          { class: "pill", "data-state": charging ? "charging" : "idle-charger" },
-          el("span", { class: "dot" }),
-          el("span", { class: "label", text: charging ? `Charging ${countdown(device.expiresAt)}` : "Idle" }),
-        ),
+        el("span", { class: "pill", "data-state": pill }, el("span", { class: "dot" }), el("span", { class: "label", text: chargerLabel(device) })),
       );
     }),
   );
@@ -120,14 +132,57 @@ let mapMovedByViewer = false; // once the viewer zooms or pans, stop refitting t
 let fittingMap = false;
 let fittedTo = ""; // the set of points the current fitted view was computed for
 
-/** Everything the map should show: every charger, and the robot once it has reported in. */
+// The robot on the map. The agent reports its position every few seconds, along with how
+// it is moving: its speed and the street route ahead, intersection by intersection. Between
+// reports the dot keeps moving along that route at that speed, so it glides round the corners
+// instead of hopping (or cutting across blocks) from report to report.
+let robotTrack = null; // the latest report: { at, from, motion }
+let robotDot = null; // where the dot is drawn right now: { lat, lng }
+let lastRobotReport = 0;
+let lastFrameAt = 0;
+let loopLine = null; // faint dotted line: the delivery loop
+let loopLineKey = "";
+let headingLine = null; // solid green line: the street route from the robot to the charger it has paid for
+let followRobot = false;
+let followButton = null;
+let nextFollowPanAt = 0;
+const COAST_SECONDS = 12; // without a new report, keep the dot moving this long at most
+
+const metersBetween = (a, b) => {
+  const x = ((b.lng - a.lng) * Math.PI) / 180 * Math.cos((((a.lat + b.lat) / 2) * Math.PI) / 180);
+  const y = ((b.lat - a.lat) * Math.PI) / 180;
+  return Math.sqrt(x * x + y * y) * 6_371_000;
+};
+
+/**
+ * Where a robot at `from` is after driving `meters` along `path` (the street route ahead of it).
+ * Returns { point, rest }: its position, and the points of the route still ahead of it.
+ */
+function advanceAlong(from, path, meters) {
+  let here = from;
+  let left = meters;
+  for (let i = 0; i < path.length; i++) {
+    const target = path[i];
+    const leg = metersBetween(here, target);
+    if (leg > left) {
+      const share = left / leg;
+      return { point: { lat: here.lat + (target.lat - here.lat) * share, lng: here.lng + (target.lng - here.lng) * share }, rest: path.slice(i) };
+    }
+    here = target;
+    left -= leg;
+  }
+  return { point: here, rest: [] };
+}
+
+/** Everything the fitted view should show: every charger and the whole delivery loop. */
 function mapPoints() {
   const points = state.devices.map((d) => [d.location.lat, d.location.lng]);
-  if (state.robot?.location) points.push([state.robot.location.lat, state.robot.location.lng]);
+  for (const point of state.robot?.route ?? []) points.push(point);
+  if (points.length === state.devices.length && state.robot?.location) points.push([state.robot.location.lat, state.robot.location.lng]);
   return points;
 }
 
-/** Zoom and pan so all chargers and the robot are in view, with some padding. */
+/** Zoom and pan so all chargers and the delivery loop are in view, with some padding. */
 function fitMap({ animate = false } = {}) {
   const points = mapPoints();
   if (!map || points.length === 0) return;
@@ -136,6 +191,14 @@ function fitMap({ animate = false } = {}) {
   fittedTo = JSON.stringify(points);
   mapMovedByViewer = false;
   if (!animate) fittingMap = false; // an animated fit clears the flag when it finishes (moveend)
+}
+
+function setFollowRobot(on) {
+  followRobot = on;
+  if (followButton) {
+    followButton.setAttribute("aria-pressed", String(on));
+    followButton.textContent = on ? "Following robot" : "Follow robot";
+  }
 }
 
 function createMap() {
@@ -157,21 +220,32 @@ function createMap() {
   map.on("moveend", () => {
     fittingMap = false;
   });
+  // Dragging the map by hand means "let me look around": stop following.
+  map.on("dragstart", () => setFollowRobot(false));
 
-  // "Recenter": back to the view that fits every charger and the robot.
-  const Recenter = L.Control.extend({
+  // Top-right buttons. "Follow robot" keeps the dot in view as it drives; "Recenter" goes
+  // back to the view that fits every charger and the delivery loop.
+  const Actions = L.Control.extend({
     options: { position: "topright" },
     onAdd() {
-      const button = L.DomUtil.create("button", "map-recenter");
-      button.type = "button";
-      button.textContent = "Recenter";
-      button.title = "Show all chargers and the robot";
-      L.DomEvent.disableClickPropagation(button);
-      L.DomEvent.on(button, "click", () => fitMap({ animate: true }));
-      return button;
+      const box = L.DomUtil.create("div", "map-actions");
+      L.DomEvent.disableClickPropagation(box);
+
+      followButton = L.DomUtil.create("button", "map-recenter", box);
+      followButton.type = "button";
+      followButton.title = "Pan the map to keep the robot in view";
+      L.DomEvent.on(followButton, "click", () => setFollowRobot(!followRobot));
+      setFollowRobot(followRobot);
+
+      const recenter = L.DomUtil.create("button", "map-recenter", box);
+      recenter.type = "button";
+      recenter.textContent = "Recenter";
+      recenter.title = "Show all chargers and the delivery loop";
+      L.DomEvent.on(recenter, "click", () => fitMap({ animate: true }));
+      return box;
     },
   });
-  map.addControl(new Recenter());
+  map.addControl(new Actions());
 
   // Leaflet measures its container once. Re-measure after the panel has laid out and whenever
   // it changes size, or tiles render for the wrong area and part of the map stays blank.
@@ -182,31 +256,97 @@ function createMap() {
   requestAnimationFrame(settle);
   new ResizeObserver(settle).observe($("map"));
   fitMap();
+  requestAnimationFrame(animateRobot);
+}
+
+/** Take in the agent's latest position report (it rides on every agent event). */
+function noteRobotReport() {
+  const robot = state.robot;
+  if (!robot?.location || state.robotSeenAt === lastRobotReport) return;
+  lastRobotReport = state.robotSeenAt;
+  // A report replayed from history says where the robot was, not how it is moving now.
+  const age = Date.now() - state.robotSeenAt;
+  const live = age < 8000 && robot.motion;
+  robotTrack = {
+    at: performance.now() - Math.min(Math.max(age, 0), 1000),
+    from: robot.location,
+    motion: live ? robot.motion : { mode: "holding", speedMps: 0, path: [], loops: false },
+  };
+  robotDot ??= { ...robot.location };
+}
+
+/** Runs every frame: glide the dot, keep the green line attached to it, follow if asked. */
+function animateRobot(now) {
+  requestAnimationFrame(animateRobot);
+  const marker = markers.get("robot");
+  if (!map || !robotTrack || !robotDot || !marker) return;
+
+  const { from, motion } = robotTrack;
+  const coasted = Math.min((now - robotTrack.at) / 1000, COAST_SECONDS);
+  const { point: target, rest } = advanceAlong(from, motion.path ?? [], (motion.speedMps ?? 0) * coasted);
+
+  // Ease toward the target, so a small correction from a new report is a glide, never a jump.
+  const ease = Math.min(1, ((now - lastFrameAt) / 1000) * 8);
+  lastFrameAt = now;
+  robotDot.lat += (target.lat - robotDot.lat) * ease;
+  robotDot.lng += (target.lng - robotDot.lng) * ease;
+  marker.setLatLng([robotDot.lat, robotDot.lng]);
+
+  // Solid green line along the streets from the robot to the charger it has paid for, while it
+  // drives there. It is the rest of the robot's own route, so it turns at the same corners.
+  const stillDriving = motion.mode === "to_charger" && rest.length > 0;
+  if (stillDriving) {
+    const line = [[robotDot.lat, robotDot.lng], ...rest.map((p) => [p.lat, p.lng])];
+    if (headingLine) headingLine.setLatLngs(line);
+    else headingLine = L.polyline(line, { color: "#0ca30c", weight: 4, opacity: 0.95, lineJoin: "round", interactive: false }).addTo(map);
+  } else if (headingLine) {
+    headingLine.remove();
+    headingLine = null;
+  }
+
+  // Follow: when the dot nears the edge of the view, pan to bring it back to the middle.
+  if (followRobot && now > nextFollowPanAt && !map.getBounds().pad(-0.2).contains([robotDot.lat, robotDot.lng])) {
+    nextFollowPanAt = now + 800; // let one pan finish before starting another
+    fittingMap = true; // our move, not the viewer's
+    map.panTo([robotDot.lat, robotDot.lng], { animate: true, duration: 0.6 });
+  }
 }
 
 function renderMap() {
   if (!window.L || state.devices.length === 0) return;
   if (!map) createMap();
 
-  const place = (key, location, html, title) => {
-    const marker = markers.get(key);
+  const iconFor = (html) => L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] });
+  for (const device of state.devices) {
+    // Green: free. Amber: in use by another robot. Blue and pulsing: charging the robot that paid.
+    const shown = { charging: "charging", in_use: "in_use" }[device.status] ?? "idle";
+    const html = `<div class="marker" data-status="${shown}">⚡</div>`;
+    const marker = markers.get(device.id);
     if (!marker) {
-      const icon = L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] });
-      markers.set(key, Object.assign(L.marker([location.lat, location.lng], { icon, title, keyboard: false }).addTo(map), { shownAs: html }));
-      return;
-    }
-    marker.setLatLng([location.lat, location.lng]);
-    if (marker.shownAs !== html) {
-      marker.setIcon(L.divIcon({ html, className: "", iconSize: [22, 22], iconAnchor: [11, 11] }));
+      markers.set(device.id, Object.assign(L.marker([device.location.lat, device.location.lng], { icon: iconFor(html), title: device.name, keyboard: false }).addTo(map), { shownAs: html }));
+    } else if (marker.shownAs !== html) {
+      marker.setIcon(iconFor(html));
       marker.shownAs = html;
     }
-  };
-  for (const device of state.devices) {
-    place(device.id, device.location, `<div class="marker" data-status="${device.status === "charging" ? "charging" : "idle"}">⚡</div>`, device.name);
   }
-  if (state.robot?.location) place("robot", state.robot.location, '<div class="marker-robot"></div>', state.robot.id ?? "robot");
 
-  // The robot appeared or moved: refit, unless the viewer has taken over the view.
+  // The delivery loop, as a faint dotted line under everything else. The robot sends it as the
+  // street route through all its stops, already closed, so the dots run along the streets.
+  const route = state.robot?.route ?? [];
+  if (route.length > 1 && JSON.stringify(route) !== loopLineKey) {
+    loopLineKey = JSON.stringify(route);
+    loopLine?.remove();
+    loopLine = L.polyline(route, { color: "#c3c2b7", weight: 2, opacity: 0.5, dashArray: "1 7", lineCap: "round", interactive: false }).addTo(map);
+  }
+
+  // The robot's dot. animateRobot() moves it; here it is only created, on top of the chargers.
+  noteRobotReport();
+  if (robotDot && !markers.has("robot")) {
+    const icon = L.divIcon({ html: '<div class="marker-robot"></div>', className: "", iconSize: [22, 22], iconAnchor: [11, 11] });
+    markers.set("robot", L.marker([robotDot.lat, robotDot.lng], { icon, title: state.robot.id ?? "robot", keyboard: false, zIndexOffset: 1000 }).addTo(map));
+  }
+
+  // The set of things to show changed (the loop arrived): refit, unless the viewer has taken over.
   if (!mapMovedByViewer && fittedTo !== JSON.stringify(mapPoints())) fitMap();
 }
 
@@ -254,7 +394,7 @@ function cycleCard(event) {
 
 function setOutcome(cycle, outcome) {
   const tone = { charging: "good", refused: "bad", failed: "bad", done: "good" }[outcome] ?? "warn";
-  const label = { charging: "paid · charging", refused: "refused", failed: "failed", done: "charged" }[outcome] ?? outcome;
+  const label = { charging: "paid · charging", refused: "refused", failed: "failed", done: "charged", waiting: "waiting · no payment" }[outcome] ?? outcome;
   cycle.card.dataset.outcome = outcome === "done" ? "charging" : outcome;
   cycle.outcome.dataset.tone = tone;
   cycle.outcome.textContent = label;
@@ -281,26 +421,77 @@ function addAgentEvent(event) {
 
   const cycle = cycleCard(event);
   switch (phase) {
+    case "DISCOVER": {
+      // The options the planner weighs: each charger's state, the drive, and what is left on arrival.
+      if (!Array.isArray(data.chargers) || data.chargers.length === 0) return void cycle.steps.append(step("DISCOVER", message));
+      const rows = [...data.chargers]
+        .sort((a, b) => a.distanceKm - b.distanceKm)
+        .map((option) => {
+          const free = option.status === "idle";
+          const reach = !option.reachable ? "out of reach" : `arrive at ${Math.floor(option.batteryOnArrivalPct)}%`;
+          const waitNote = free || !option.ifWait ? "" : option.ifWait.reachable ? ` · after waiting: ${Math.floor(option.ifWait.batteryOnArrivalPct)}%` : " · out of reach after waiting";
+          return el(
+            "li",
+            { class: "option", "data-usable": String(free && option.reachable) },
+            el("span", { class: "option-name", text: option.name ?? option.id }),
+            el("span", { class: "chip", "data-ok": free ? "true" : "warn", text: free ? "idle" : `in use · ${option.minutesUntilFree} min` }),
+            el("span", { class: "option-facts", text: `${Number(option.distanceKm).toFixed(1)} km · drive costs ${option.drainToReachPct ?? 0}% · ${reach}${waitNote}` }),
+          );
+        });
+      cycle.steps.append(step("DISCOVER", el("div", { class: "options-title", text: "Options weighed" }), el("ul", { class: "options" }, rows)));
+      break;
+    }
+    case "WAIT":
+      cycle.steps.append(
+        step(
+          "WAIT",
+          el("span", { class: "badge", "data-tone": "warn", text: `waiting for ${data.name ?? data.waitFor} · about ${data.minutesUntilFree} min` }),
+          " ",
+          el("span", { text: `no payment made · checking again in ${data.recheckInSeconds}s` }),
+        ),
+      );
+      setOutcome(cycle, "waiting");
+      break;
     case "PLAN": {
-      if (!data.planner) return void cycle.steps.append(step("PLAN", message));
+      if (!data.planner) {
+        cycle.steps.append(step("PLAN", message));
+        if (data.failed) setOutcome(cycle, "failed");
+        return;
+      }
       const byClaude = data.planner === "claude";
       cycle.steps.append(
         step(
           "PLAN",
-          el("div", {}, el("strong", { text: `${data.deviceId} · ${data.minutes} min` }), " ", el("span", { class: "badge", "data-tone": byClaude ? "accent" : "neutral", text: byClaude ? `Claude · ${data.model}` : "rule-based planner" })),
+          el("div", {}, el("strong", { text: data.action === "wait" ? `wait for ${data.deviceId}` : `${data.deviceId} · ${data.minutes} min` }), " ", el("span", { class: "badge", "data-tone": byClaude ? "accent" : "neutral", text: byClaude ? `Claude · ${data.model}` : "rule-based planner" })),
           el("div", { class: "reason" }, el("span", { class: "reason-by", text: byClaude ? "Claude's reason" : "Reason" }), el("span", { text: data.reason })),
         ),
       );
       break;
     }
     case "GUARD": {
+      if (data.awaitingApproval && data.emergency) {
+        return void cycle.steps.append(
+          step("GUARD", el("span", { class: "badge", "data-tone": "bad", text: `emergency override requested · over ${limitNames(data.exceeded)}` }), " ", el("span", { text: "waiting for a human" })),
+        );
+      }
       if (data.awaitingApproval) return void cycle.steps.append(step("GUARD", el("span", { class: "badge", "data-tone": "warn", text: "waiting for human approval" })));
+      if (data.overrideGranted) {
+        return void cycle.steps.append(
+          step(
+            "GUARD",
+            el("span", { class: "badge", "data-tone": "bad", text: `soft limit overridden: ${limitNames(data.softLimitsOverridden)}` }),
+            " ",
+            el("span", { text: `approved by ${data.approvalBy ?? "a human"} · this one payment only, no limit changed` }),
+          ),
+        );
+      }
       if (!data.checks) return void cycle.steps.append(step("GUARD", message));
       const chips = data.checks.map((check) => el("span", { class: "chip", "data-ok": String(check.ok), title: check.reason ?? "passed", text: `${check.ok ? "✓" : "✗"} ${check.name}` }));
+      const what = data.emergency ? "emergency override " : "";
       const approval = {
         "not-needed": ["true", "✓ approval not needed"],
-        granted: ["true", `✓ approved${data.approvalBy ? ` (${data.approvalBy})` : ""}`],
-        denied: ["false", `✗ denied${data.approvalBy ? ` (${data.approvalBy})` : ""}`],
+        granted: ["true", `✓ ${what}approved${data.approvalBy ? ` (${data.approvalBy})` : ""}`],
+        denied: ["false", `✗ ${what}denied${data.approvalBy ? ` (${data.approvalBy})` : ""}`],
         "not-asked": ["neutral", "approval not asked"],
       }[data.approval];
       if (approval) chips.push(el("span", { class: "chip", "data-ok": approval[0], text: approval[1] }));
@@ -569,6 +760,10 @@ function renderPayments() {
 
 // --- Approval modal ----------------------------------------------------------------------
 
+// The two soft limits a human may override for one payment when the battery is critically low.
+const LIMIT_LABELS = { "rate-limit": "Rate limit", daily: "Daily budget" };
+const limitNames = (names = []) => names.map((name) => (LIMIT_LABELS[name] ?? name).toLowerCase()).join(" and ") || "a soft limit";
+
 function renderApproval() {
   const modal = $("approvalModal");
   const approval = state.approval;
@@ -580,6 +775,20 @@ function renderApproval() {
   $("approvalCharger").textContent = state.devices.find((d) => d.id === approval.deviceId)?.name ?? approval.deviceId;
   $("approvalMinutes").textContent = `${approval.minutes} minutes`;
   $("approvalPayTo").textContent = shorten(approval.payTo, 8, 8);
+
+  // An emergency override (critically low battery, only a soft limit in the way) is shown in red.
+  const emergency = approval.emergency;
+  modal.dataset.emergency = String(Boolean(emergency));
+  $("approvalKicker").textContent = emergency ? "Emergency override" : "Human approval needed";
+  $("approvalTitle").textContent = emergency ? "Allow this one payment?" : "Approve this payment?";
+  $("approveButton").textContent = emergency ? "Approve override" : "Approve";
+  $("approvalEmergency").hidden = !emergency;
+  if (emergency) {
+    $("approvalEmergencyWhy").textContent = `Battery at ${emergency.batteryPct}%. This payment would exceed:`;
+    $("approvalEmergencyLimits").replaceChildren(
+      ...emergency.exceeded.map((limit) => el("li", {}, el("strong", { text: LIMIT_LABELS[limit.name] ?? limit.name }), el("span", { text: limit.reason.replace(/(,\s*|\s*\()[A-Z][A-Z0-9_]+\)$/, (tail) => (tail.startsWith(",") ? ")" : "")).replace(/^./, (first) => first.toUpperCase()) }))),
+    );
+  }
   $("approveButton").disabled = $("denyButton").disabled = !state.token;
   if (!state.token) $("approvalNote").textContent = "Read-only view: approvals can only be answered from the dashboard on localhost.";
   if (!modal.open) modal.showModal();
@@ -621,6 +830,7 @@ function control(method, path, body) {
 async function refresh() {
   const snapshot = await (await fetch("/state")).json();
   state.devices = snapshot.devices;
+  state.secondsPerMinute = snapshot.secondsPerMinute ?? 60;
   state.payments = snapshot.payments;
   state.paused = snapshot.paused;
   state.streams = snapshot.streams;
@@ -672,6 +882,8 @@ function onEvent(event) {
     case "payment_settled":
     case "charging_started":
     case "charging_ended":
+    case "charger_occupied":
+    case "charger_freed":
     case "approval_requested":
     case "approval_resolved":
     case "agent_paused":
@@ -752,7 +964,7 @@ async function start() {
   connect();
   setInterval(() => {
     renderRobot(); // notices when the agent goes quiet
-    if (state.devices.some((d) => d.status === "charging")) renderChargers(); // countdowns
+    if (state.devices.some((d) => d.status !== "idle")) renderChargers(); // countdowns
     tickApproval();
   }, 1000);
 }

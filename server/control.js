@@ -15,6 +15,7 @@ import {
   createApproval,
   getApproval,
   noteStreamsDelivery,
+  pendingApprovals,
   resolveApproval,
   setPaused,
   snapshot,
@@ -84,7 +85,19 @@ control.post("/agent/approvals", requireToken, (req, res) => {
   const { id, deviceId, minutes, amount, payTo, timeoutSeconds } = req.body ?? {};
   if (typeof id !== "string" || !id) return res.status(400).json({ error: "id is required" });
   if (getApproval(id)) return res.status(409).json({ error: "approval already exists" });
-  res.status(201).json(createApproval({ id, deviceId, minutes, amount, payTo, timeoutSeconds }));
+
+  // An emergency override request: keep only the fields the dashboard shows, and allow one at a time.
+  const asked = req.body?.emergency;
+  const emergency = asked
+    ? {
+        batteryPct: Number(asked.batteryPct),
+        exceeded: (Array.isArray(asked.exceeded) ? asked.exceeded : []).map((limit) => ({ name: String(limit?.name ?? ""), reason: String(limit?.reason ?? "") })),
+      }
+    : null;
+  if (emergency && pendingApprovals().some((approval) => approval.emergency)) {
+    return res.status(409).json({ error: "an emergency override request is already waiting for an answer" });
+  }
+  res.status(201).json(createApproval({ id, deviceId, minutes, amount, payTo, timeoutSeconds, emergency }));
 });
 
 control.get("/agent/approvals/:id", requireToken, (req, res) => {

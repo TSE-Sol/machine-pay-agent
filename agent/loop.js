@@ -2,14 +2,16 @@
 //
 //   OBSERVE -> DECIDE -> DISCOVER -> PLAN -> GUARD -> PAY -> VERIFY -> RECORD
 //
+// PLAN can also end the pass with a WAIT: every charger worth using is busy, so the robot
+// waits for one to free up. Nothing is paid, and the next pass looks again.
+//
 // Every phase prints one console line, is sent to the dashboard with its details, and
 // (once a charge is needed) is written to the audit log.
 // The pass stops early if no charge is needed, a guardrail refuses, or a step fails.
 import { randomUUID } from "node:crypto";
 import { formatUsdc, toBaseUnits } from "./config.js";
-import { authorizePayment, evaluatePayment, spentLast24h } from "./guardrails.js";
-import { makePlan } from "./planner.js";
-import { distanceKm } from "./robot.js";
+import { authorizePayment, emergencyOverrideFor, evaluatePayment, passesWithOverride, spentLast24h } from "./guardrails.js";
+import { chargerOptions, makePlan } from "./planner.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const clock = (isoTime) => new Date(isoTime).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -23,9 +25,10 @@ export const explorerUrl = (txSignature) => `https://explorer.solana.com/tx/${tx
  *   log     - (phase, message, data) => void; data is the structured detail for the dashboard
  *   askHuman - (question, request) => true/false or { approved, by }
  * Returns { outcome, ... } where outcome is one of:
- *   "no_charge_needed" | "charging" | "refused" | "failed"
+ *   "no_charge_needed" | "charging" | "waiting" | "refused" | "failed"
+ * A "waiting" result carries waitFor, minutesUntilFree and recheckInSeconds.
  */
-export async function runCycle({ robot, config, limits, getLimits, charger, wallet, audit, askHuman, log: output, llm }) {
+export async function runCycle({ robot, config, limits, getLimits, charger, wallet, audit, askHuman, log: output, llm, emergency = { pending: false, nextAskAt: 0 } }) {
   const cycleId = randomUUID().slice(0, 8);
   const log = (phase, message, data = {}) => output(phase, message, { cycleId, ...data });
   const record = (phase, data = {}) => audit.write({ robotId: robot.id, cycleId, phase, ...data });
@@ -64,22 +67,33 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
   // DISCOVER: what chargers exist?
   let devices;
   try {
-    devices = await charger.listDevices();
+    devices = await charger.listDevices(state.location);
   } catch (error) {
     log("DISCOVER", `charger server unreachable (${error.message})`, { failed: true });
     return finish("failed", { reasons: ["charger server unreachable"] });
   }
-  const chargers = devices.map((d) => ({
-    id: d.id,
-    name: d.name,
-    status: d.status,
-    distanceKm: Number(distanceKm(state.location, d.location).toFixed(2)),
-    priceUsdc: { 15: d.pricePer15MinUSDC, 30: d.pricePer15MinUSDC * 2, 60: d.pricePer15MinUSDC * 4 },
-  }));
-  const idleCount = chargers.filter((c) => c.status === "idle").length;
-  log("DISCOVER", `${chargers.length} chargers, ${idleCount} idle`, { chargers });
+  // The options to weigh: for each charger, whether it is free, how far the drive is along the
+  // streets, what that drive costs in battery, and whether the robot can make it at all.
+  const secondsPerMinute = config.secondsPerMinute ?? 60;
+  const waitDrainPctPerMinute = (robot.drainPctPerSecond ?? 0) * secondsPerMinute; // battery lost per simulated minute of standing still
+  const drainPctPerKm = robot.drainPctPerKm ?? 0;
+  const chargers = chargerOptions({
+    batteryPct: state.batteryPct,
+    drainPctPerKm,
+    waitDrainPctPerMinute,
+    chargers: devices.map((d) => ({
+      id: d.id,
+      name: d.name,
+      status: d.status,
+      minutesUntilFree: d.minutesUntilFree ?? 0,
+      distanceKm: robot.routeKmTo(d),
+      priceUsdc: { 15: d.pricePer15MinUSDC, 30: d.pricePer15MinUSDC * 2, 60: d.pricePer15MinUSDC * 4 },
+    })),
+  });
+  const idleCount = chargers.filter((c) => c.free).length;
+  const inReach = chargers.filter((c) => c.free && c.reachable).length;
+  log("DISCOVER", `${chargers.length} chargers: ${idleCount} idle, ${chargers.length - idleCount} in use, ${inReach} free and in reach on ${state.batteryPct}% battery`, { chargers });
   record("DISCOVER", { chargers });
-  if (idleCount === 0) return finish("failed", { reasons: ["no idle chargers"] });
 
   // PLAN: choose a charger and session length (LLM, or rules if no key / on failure)
   const plan = await makePlan(
@@ -89,24 +103,58 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
       budgetLeftUsdc: Number(formatUsdc(budgetLeft)),
       targetBatteryPct: config.targetBatteryPct,
       chargePctPerMinute: robot.chargePctPerMinute,
+      drainPctPerKm,
+      waitDrainPctPerMinute,
     },
     { apiKey: config.planner.apiKey, model: config.planner.model, llm },
   );
+  if (!plan) {
+    const reason =
+      idleCount === 0
+        ? `every charger is in use and none can be reached after waiting, on ${state.batteryPct}% battery`
+        : `no free charger can be reached on ${state.batteryPct}% battery`;
+    log("PLAN", reason, { failed: true });
+    return finish("failed", { reasons: [reason] });
+  }
   if (plan.note) log("PLAN", `using the rule-based planner (${plan.note})`, { note: plan.note });
-  log("PLAN", `(${plan.planner}) ${plan.deviceId}, ${plan.minutes} min — "${plan.reason}"`, {
+  const choice = plan.action === "wait" ? `wait for ${plan.deviceId}` : `${plan.deviceId}, ${plan.minutes} min`;
+  log("PLAN", `(${plan.planner}) ${choice} — "${plan.reason}"`, {
     planner: plan.planner,
     model: plan.planner === "claude" ? config.planner.model : null,
+    action: plan.action,
     deviceId: plan.deviceId,
     minutes: plan.minutes,
     reason: plan.reason,
   });
   record("PLAN", plan);
 
+  // WAIT: the plan is to wait for a busy charger. No 402 is requested and nothing is paid.
+  // The next pass looks at the chargers again and decides afresh.
+  if (plan.action === "wait") {
+    const target = chargers.find((c) => c.id === plan.deviceId);
+    const recheckInSeconds = Math.max(1, Math.round(Math.min(config.retrySeconds ?? 20, target.minutesUntilFree * secondsPerMinute)));
+    const wait = { waitFor: plan.deviceId, minutesUntilFree: target.minutesUntilFree, batteryAfterWaitPct: target.ifWait.batteryOnArrivalPct, recheckInSeconds };
+    log("WAIT", `waiting for ${target.name}: in use for about ${target.minutesUntilFree} more min. No payment made; checking again in ${recheckInSeconds}s`, {
+      ...wait,
+      name: target.name,
+      planner: plan.planner,
+      reason: plan.reason,
+    });
+    record("WAIT", { ...wait, planner: plan.planner, reason: plan.reason });
+    return finish("waiting", { ...wait, planner: plan.planner });
+  }
+
   // GUARD: get the charger's real 402 payment request and run every guardrail on it
   const device = devices.find((d) => d.id === plan.deviceId);
   const expectedAmount = toBaseUnits(device.pricePer15MinUSDC) * BigInt(plan.minutes / 15);
   const quoted = await charger.requestQuote(plan.deviceId, plan.minutes).catch((error) => ({ ok: false, detail: error.message }));
   const quote = quoted.ok ? quoted.paymentRequired.accepts?.[0] : null;
+  if (!quote && quoted.status === 409) {
+    // Another robot got there first. The charger answers 409, not 402, so there is nothing to pay.
+    const reason = `${plan.deviceId} is in use (HTTP 409: ${quoted.detail}); no payment requested`;
+    log("GUARD", reason, { failed: true, chargerInUse: true });
+    return finish("failed", { reasons: [reason] });
+  }
   if (!quote) {
     const reason = `no usable 402 from ${plan.deviceId} (${quoted.detail ?? "empty accepts list"})`;
     log("GUARD", reason, { failed: true });
@@ -114,26 +162,62 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
   }
 
   const evaluation = evaluatePayment({ quote, expectedAmount, limits, payments, now });
-  let answeredBy = null; // who answered the approval question: terminal, dashboard or timeout
-  const decision = await authorizePayment(evaluation, async () => {
-    log("GUARD", `waiting for human approval of ${formatUsdc(evaluation.amount)} USDC`, { awaitingApproval: true });
-    const answer = await askHuman(`[GUARD] Approve ${formatUsdc(evaluation.amount)} USDC for ${plan.minutes} min at ${plan.deviceId}?`, {
-      deviceId: plan.deviceId,
-      minutes: plan.minutes,
-      amount: quote.amount,
-      payTo: quote.payTo,
-    });
-    answeredBy = answer?.by ?? null;
-    return answer === true || answer?.approved === true;
-  });
+
+  // Emergency override. If the battery is critically low and only soft limits (rate limit,
+  // daily budget) stand in the way, a human may be asked to allow this one payment. A hard
+  // failure is never escalated. One request at a time, and after a "no" (or no answer) the
+  // agent waits before asking again instead of nagging on every retry.
+  const batteryPct = Math.floor(robot.batteryPct);
+  const escalable = emergencyOverrideFor(evaluation, { batteryPct: robot.batteryPct, criticalBatteryPct: config.criticalBatteryPct ?? 10 });
+  let emergencyLimits = null;
+  let emergencyNote = null;
+  if (escalable && emergency.pending) emergencyNote = "emergency: an override request is already waiting for an answer";
+  else if (escalable && Date.now() < emergency.nextAskAt) {
+    emergencyNote = `emergency: the last override request was not approved; the agent may ask again in ${Math.ceil((emergency.nextAskAt - Date.now()) / 1000)}s`;
+  } else if (escalable) emergencyLimits = escalable;
+
+  let answeredBy = null; // who answered the approval question: terminal, dashboard, voice or timeout
+  const decision = await authorizePayment(
+    evaluation,
+    async (ask) => {
+      const request = { deviceId: plan.deviceId, minutes: plan.minutes, amount: quote.amount, payTo: quote.payTo };
+      let question = `[GUARD] Approve ${formatUsdc(evaluation.amount)} USDC for ${plan.minutes} min at ${plan.deviceId}?`;
+      if (ask.emergency) {
+        emergency.pending = true;
+        const exceeded = evaluation.checks.filter((check) => ask.limits.includes(check.name)).map((check) => ({ name: check.name, reason: check.reason }));
+        request.emergency = { batteryPct, exceeded };
+        question = `[GUARD] EMERGENCY OVERRIDE: battery ${batteryPct}%, and this payment is over the ${ask.limits.join(" and ")} limit. Allow this ONE payment of ${formatUsdc(evaluation.amount)} USDC at ${plan.deviceId}?`;
+        log("GUARD", `emergency: battery ${batteryPct}% and only ${ask.limits.join(" and ")} in the way; asking a human to allow this one payment`, { awaitingApproval: true, emergency: true, exceeded: ask.limits });
+      } else {
+        log("GUARD", `waiting for human approval of ${formatUsdc(evaluation.amount)} USDC`, { awaitingApproval: true });
+      }
+      try {
+        const answer = await askHuman(question, request);
+        answeredBy = answer?.by ?? null;
+        const approved = answer === true || answer?.approved === true;
+        if (ask.emergency && !approved) emergency.nextAskAt = Date.now() + (config.emergencyRetrySeconds ?? 120) * 1000;
+        return approved;
+      } finally {
+        if (ask.emergency) emergency.pending = false;
+      }
+    },
+    { emergency: emergencyLimits },
+  );
+  const asked = emergencyLimits ? "emergency-override" : "approval";
   const via = answeredBy ? ` (${answeredBy})` : "";
   const approvalMark = {
     "not-needed": "✓ approval-not-needed",
-    granted: `✓ approval-granted${via}`,
-    denied: `✗ approval-denied${via}`,
+    granted: `✓ ${asked}-granted${via}`,
+    denied: `✗ ${asked}-denied${via}`,
     "not-asked": "– approval-not-asked",
   };
   const marks = evaluation.checks.map((check) => `${check.ok ? "✓" : "✗"} ${check.name}`);
+  // What this decision meant for the soft limits, for the feed and the audit log.
+  const override = {
+    emergency: Boolean(emergencyLimits),
+    batteryPct,
+    softLimitsOverridden: decision.overridden, // e.g. ["rate-limit"]; empty unless a human allowed it
+  };
   log("GUARD", [...marks, approvalMark[decision.approval]].join(" "), {
     checks: evaluation.checks,
     approval: decision.approval,
@@ -142,6 +226,7 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
     amount: quote.amount,
     deviceId: plan.deviceId,
     minutes: plan.minutes,
+    ...override,
   });
   record("GUARD", {
     quote: { scheme: quote.scheme, network: quote.network, asset: quote.asset, payTo: quote.payTo, amount: quote.amount },
@@ -150,10 +235,19 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
     approval: decision.approval,
     approvalBy: answeredBy,
     approved: decision.approved,
+    ...override,
   });
   if (!decision.approved) {
-    for (const reason of decision.reasons) log("REFUSED", reason, { reasons: decision.reasons });
-    return finish("refused", { reasons: decision.reasons });
+    const reasons = emergencyNote ? [...decision.reasons, emergencyNote] : decision.reasons;
+    for (const reason of reasons) log("REFUSED", reason, { reasons });
+    return finish("refused", { reasons });
+  }
+  if (decision.overridden.length > 0) {
+    log("GUARD", `soft limit overridden for this one payment: ${decision.overridden.join(", ")} (approved by ${answeredBy ?? "a human"}). No limit was changed.`, {
+      overrideGranted: true,
+      softLimitsOverridden: decision.overridden,
+      approvalBy: answeredBy,
+    });
   }
 
   // A human may take a minute to answer, and a 402 goes stale in about that time (it carries
@@ -168,7 +262,8 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
     const recheck = sameTerms
       ? evaluatePayment({ quote: fresh, expectedAmount, limits: getLimits ? getLimits() : limits, payments: audit.payments(), now: Date.now() })
       : null;
-    if (!recheck?.allowed) {
+    // After an emergency override, the overridden soft limits may still fail; nothing else may.
+    if (!recheck || !passesWithOverride(recheck, decision.overridden)) {
       const reasons = !fresh
         ? [`requote: no usable 402 from ${plan.deviceId} after approval (${requoted.detail ?? "empty accepts list"})`]
         : !sameTerms
@@ -184,6 +279,7 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
   // PAY: sign the approved request and retry with PAYMENT-SIGNATURE
   const paymentId = randomUUID();
   const payment = { paymentId, deviceId: plan.deviceId, amount: quote.amount, payTo: quote.payTo };
+  if (decision.overridden.length > 0) Object.assign(payment, { softLimitsOverridden: decision.overridden, approvalBy: answeredBy });
   record("PAY", { ...payment, status: "pending" });
 
   let paymentHeaders;
@@ -237,10 +333,14 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
 
   // RECORD: the cycle's outcome
   const spentNow = spent + evaluation.amount;
-  log("RECORD", `paid ${formatUsdc(evaluation.amount)} USDC | 24h spend ${formatUsdc(spentNow)} of ${formatUsdc(limits.dailyBudget)} USDC | audit log updated`, {
+  const overrideNote = decision.overridden.length > 0 ? ` | emergency override of ${decision.overridden.join(", ")} by ${answeredBy ?? "a human"}` : "";
+  // Only present when a human allowed this one payment past a soft limit.
+  const overrideRecord = decision.overridden.length > 0 ? { softLimitsOverridden: decision.overridden, approvalBy: answeredBy } : {};
+  log("RECORD", `paid ${formatUsdc(evaluation.amount)} USDC | 24h spend ${formatUsdc(spentNow)} of ${formatUsdc(limits.dailyBudget)} USDC | audit log updated${overrideNote}`, {
     outcome: "charging",
     amount: quote.amount,
     txSignature,
+    ...overrideRecord,
   });
   return finish("charging", {
     deviceId: plan.deviceId,
@@ -249,5 +349,6 @@ export async function runCycle({ robot, config, limits, getLimits, charger, wall
     txSignature,
     explorerUrl: explorerUrl(txSignature),
     planner: plan.planner,
+    ...overrideRecord,
   });
 }

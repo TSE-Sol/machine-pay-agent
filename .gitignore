@@ -17,6 +17,12 @@ keys/
 *keypair*.json
 wallet*.json
 
+# Credentials and certificates — never commit
+*.pem
+*credentials*.json
+.cloudflared/
+tunnel/*.json
+
 # Agent runtime files
 agent/audit.log
 agent/PAUSED

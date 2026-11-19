@@ -77,7 +77,12 @@ console.log(`  planner         ${config.planner.apiKey ? `claude (${config.plann
 console.log(
   `  limits          per-tx ${formatUsdc(limits.maxPerTx)} | daily ${formatUsdc(limits.dailyBudget)} | approval above ${formatUsdc(limits.approvalThreshold)} USDC | ${limits.maxPaymentsPer10Min} payments / 10 min`,
 );
-console.log(`  battery         ${robot.snapshot().batteryPct}%, seeks a charge below ${config.lowBatteryPct}%\n`);
+console.log(`  battery         ${robot.snapshot().batteryPct}%, seeks a charge below ${config.lowBatteryPct}%`);
+console.log(`  reach           the drive to a charger costs ${config.robot.drainPctPerKm}% per km; an unreachable charger is never chosen`);
+console.log(`  emergency       at ${config.criticalBatteryPct}% or below, a human may allow one payment past the rate limit or daily budget\n`);
+
+// Emergency overrides: one request at a time, and a wait after a "no" before asking again.
+const emergency = { pending: false, nextAskAt: 0 };
 
 let attempts = 0; // charge attempts finished (paid, refused or failed)
 let nextAttemptAt = 0;
@@ -101,9 +106,15 @@ while (true) {
     }
 
     if (Date.now() >= nextAttemptAt) {
-      const result = await runCycle({ robot, config, limits: currentLimits(), getLimits: currentLimits, charger, wallet, audit, askHuman, log });
+      const result = await runCycle({ robot, config, limits: currentLimits(), getLimits: currentLimits, charger, wallet, audit, askHuman, log, emergency });
       lastCycleId = result.cycleId;
-      if (result.outcome !== "no_charge_needed") attempts++;
+      if (result.outcome !== "no_charge_needed" && result.outcome !== "waiting") attempts++;
+      if (result.outcome === "waiting") {
+        // Every charger worth using is busy: look again when one should be free (or sooner).
+        log("RECORD", `no payment made (waiting for ${result.waitFor}); checking again in ${result.recheckInSeconds}s`, { cycleId: result.cycleId, outcome: "waiting" });
+        console.log();
+        nextAttemptAt = Date.now() + result.recheckInSeconds * 1000;
+      }
       if (result.outcome === "refused" || result.outcome === "failed") {
         log("RECORD", `no payment made (${result.outcome}); next attempt in ${config.retrySeconds}s`, { cycleId: result.cycleId, outcome: result.outcome, reasons: result.reasons ?? [] });
         console.log();

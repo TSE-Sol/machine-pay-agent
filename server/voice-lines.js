@@ -37,15 +37,41 @@ export function lowBatteryLine({ batteryPct }) {
   return `Battery at ${Math.round(batteryPct)} percent. Looking for a charger.`;
 }
 
-/** isClosest: whether the chosen charger really is the nearest idle one. */
-export function planLine({ chargerName, isClosest, minutes, amount }) {
-  const choice = isClosest ? `${spokenName(chargerName)} is closest.` : `I picked ${spokenName(chargerName)}.`;
-  const sentence = `${choice} Buying ${numberWords(minutes)} minutes for ${moneyWords(amount)}.`;
-  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+const capitalized = (sentence) => sentence.charAt(0).toUpperCase() + sentence.slice(1);
+
+/**
+ * isClosest: whether the chosen charger really is the nearest idle one.
+ * busyName: a closer charger that was passed over because it is in use, if there is one.
+ */
+export function planLine({ chargerName, isClosest, minutes, amount, busyName = null }) {
+  const choice = busyName
+    ? `${spokenName(busyName)} is busy. Going to ${spokenName(chargerName)}.`
+    : isClosest
+      ? `${spokenName(chargerName)} is closest.`
+      : `I picked ${spokenName(chargerName)}.`;
+  return capitalized(`${choice} Buying ${numberWords(minutes)} minutes for ${moneyWords(amount)}.`);
+}
+
+/** Said when the agent decides to wait for a busy charger instead of paying anywhere. */
+export function waitLine({ chargerName, minutes }) {
+  const n = Math.max(1, Math.round(minutes));
+  return capitalized(`${spokenName(chargerName)} is busy. Waiting ${numberWords(n)} ${n === 1 ? "minute" : "minutes"} for it.`);
 }
 
 export function approvalLine() {
   return "This payment is above my limit. I need your approval.";
+}
+
+const LIMIT_REACHED = { "rate-limit": "Rate limit", daily: "Daily budget" };
+
+/**
+ * Said when the battery is critically low and only a soft limit blocks the charge.
+ * exceeded: the names of the limits in the way, e.g. ["rate-limit"].
+ */
+export function emergencyLine({ batteryPct, exceeded }) {
+  const limits = exceeded.map((name) => LIMIT_REACHED[name]).filter(Boolean);
+  const reached = limits.length === 0 ? "A spending limit" : limits.length === 1 ? limits[0] : `${limits[0]} and ${limits[1].toLowerCase()}`;
+  return `Battery at ${Math.round(batteryPct)} percent. ${reached} reached. Approve an emergency charge?`;
 }
 
 /** confirmedOnChain: an independent check (RPC or QuickNode Streams) saw the payment land. */

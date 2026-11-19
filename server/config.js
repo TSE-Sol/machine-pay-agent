@@ -35,6 +35,8 @@ export const config = {
   sttModel: env.ELEVENLABS_STT_MODEL ?? "scribe_v3",
   // Real seconds per paid "minute". Leave at 60; lower it (e.g. 1) for quick demos.
   secondsPerMinute: Number(env.DEMO_SECONDS_PER_MINUTE ?? 60),
+  // Other (simulated) robots using the chargers: "off", "random", or "demo" (a predictable show).
+  chargerOccupancy: (env.CHARGER_OCCUPANCY || "random").toLowerCase(),
 };
 
 export const ALLOWED_MINUTES = [15, 30, 60];
@@ -62,6 +64,7 @@ export function assertConfig() {
   if (!isAddress(config.usdcMint)) problems.push("USDC_MINT must be a Solana mint address");
   if (!(config.pricePer15MinBaseUnits > 0)) problems.push("PRICE_USDC_PER_15MIN must be a positive number");
   if (!(config.secondsPerMinute > 0)) problems.push("DEMO_SECONDS_PER_MINUTE must be a positive number");
+  if (!["off", "random", "demo"].includes(config.chargerOccupancy)) problems.push("CHARGER_OCCUPANCY must be off, random or demo");
   if (problems.length > 0) {
     console.error("Config error:\n  - " + problems.join("\n  - "));
     process.exit(1);

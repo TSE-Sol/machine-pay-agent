@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
+  HARD_GUARDRAILS,
+  SOFT_GUARDRAILS,
   authorizePayment,
   budgetNextResetAt,
   checkAllowlist,
@@ -10,9 +12,11 @@ import {
   checkPerTx,
   checkPrice,
   checkRateLimit,
+  emergencyOverrideFor,
   evaluatePayment,
   needsApproval,
   parseAmount,
+  passesWithOverride,
 } from "./guardrails.js";
 
 const MERCHANT = "AsCyNEGaHqxeyoJQkW5AXdDeTJpN9SiPviWY8sNiVG5w";
@@ -244,5 +248,102 @@ describe("kill switch (AGENT_PAUSED)", () => {
     assert.equal(result.allowed, false);
     assert.deepEqual(result.checks.filter((c) => !c.ok).map((c) => c.name), ["kill-switch"]);
     assert.match(result.reasons[0], /AGENT_PAUSED=true/);
+  });
+});
+
+describe("rate limit window in demo mode (DEMO_SECONDS_PER_MINUTE)", () => {
+  // DEMO_SECONDS_PER_MINUTE=1 turns the 10-minute window into 10 seconds, like the charge time.
+  const demo = limits({ rateLimitWindowMs: 10_000 });
+  const secondsAgo = (seconds) => ({ time: NOW - seconds * 1000, amount: 200_000n });
+
+  test("only payments inside the scaled window count", () => {
+    const old = [15, 20, 30, 40, 50].map(secondsAgo); // all within 10 real minutes, none within 10 demo minutes
+    assert.equal(checkRateLimit(old, demo, NOW).ok, true);
+    assert.equal(checkRateLimit(old, limits(), NOW).ok, false, "unscaled, the same payments hit the limit");
+  });
+  test("the limit still applies inside the scaled window, and the reason says so", () => {
+    const check = checkRateLimit([1, 2, 3, 4, 5].map(secondsAgo), demo, NOW);
+    assert.equal(check.ok, false);
+    assert.match(check.reason, /5 payments in the last 10 minutes of demo time \(10 s\) \(limit 5, MAX_PAYMENTS_PER_10_MIN\)/);
+  });
+});
+
+describe("hard and soft guardrails", () => {
+  const five = [paid(1), paid(2), paid(3), paid(4), paid(5)]; // rate limit reached
+  const rateLimited = (overrides = {}) => evaluate({ payments: five, ...overrides });
+  const overBudget = () => evaluate({ limits: limits({ dailyBudget: 100_000n }) });
+  const critical = { batteryPct: 6, criticalBatteryPct: 10 };
+
+  test("every guardrail is in exactly one group", () => {
+    assert.deepEqual([...HARD_GUARDRAILS], ["kill-switch", "allowlist", "price", "per-tx"]);
+    assert.deepEqual([...SOFT_GUARDRAILS], ["rate-limit", "daily"]);
+    assert.deepEqual(evaluate().checks.map((check) => check.name).sort(), [...HARD_GUARDRAILS, ...SOFT_GUARDRAILS].sort());
+    assert.throws(() => SOFT_GUARDRAILS.push("per-tx"), "the groups cannot be changed at runtime");
+  });
+
+  test("an evaluation reports its failures by group", () => {
+    assert.deepEqual([rateLimited().hardFailures, rateLimited().softFailures], [[], ["rate-limit"]]);
+    assert.deepEqual([overBudget().hardFailures, overBudget().softFailures], [[], ["daily"]]);
+    const mixed = rateLimited({ limits: limits({ maxPerTx: 100_000n, paused: true }) });
+    assert.deepEqual([mixed.hardFailures.sort(), mixed.softFailures], [["kill-switch", "per-tx"], ["rate-limit"]]);
+  });
+
+  test("only a soft failure at or below the critical battery level can be escalated", () => {
+    assert.deepEqual(emergencyOverrideFor(rateLimited(), critical), ["rate-limit"]);
+    assert.deepEqual(emergencyOverrideFor(overBudget(), critical), ["daily"]);
+    assert.deepEqual(emergencyOverrideFor(rateLimited(), { batteryPct: 10, criticalBatteryPct: 10 }), ["rate-limit"], "exactly at the level");
+    assert.equal(emergencyOverrideFor(rateLimited(), { batteryPct: 10.5, criticalBatteryPct: 10 }), null, "above the level");
+    assert.equal(emergencyOverrideFor(evaluate(), critical), null, "nothing failed, nothing to override");
+    assert.equal(emergencyOverrideFor(rateLimited(), { batteryPct: undefined, criticalBatteryPct: 10 }), null, "unknown battery is not an emergency");
+  });
+
+  test("a hard failure is never escalated, even at 1% battery", () => {
+    const hard = {
+      "kill-switch": rateLimited({ limits: limits({ paused: true }) }),
+      allowlist: rateLimited({ quote: honestQuote({ payTo: ATTACKER }) }),
+      price: rateLimited({ quote: honestQuote({ amount: "900000" }) }),
+      "per-tx": rateLimited({ limits: limits({ maxPerTx: 100_000n }) }),
+    };
+    for (const [name, evaluation] of Object.entries(hard)) {
+      assert.ok(evaluation.hardFailures.includes(name), name);
+      assert.equal(emergencyOverrideFor(evaluation, { batteryPct: 1, criticalBatteryPct: 10 }), null, name);
+    }
+  });
+
+  test("an override excuses only the limits that were named", () => {
+    assert.equal(passesWithOverride(rateLimited(), ["rate-limit"]), true);
+    assert.equal(passesWithOverride(rateLimited(), ["daily"]), false);
+    assert.equal(passesWithOverride(rateLimited(), []), false);
+    assert.equal(passesWithOverride(rateLimited({ limits: limits({ paused: true }) }), ["rate-limit", "kill-switch"]), false, "a hard failure cannot be overridden");
+    assert.equal(passesWithOverride(evaluate(), []), true);
+  });
+
+  test("emergency approval: yes pays, and reports which limit was overridden", async () => {
+    const asks = [];
+    const decision = await authorizePayment(rateLimited(), async (ask) => (asks.push(ask), true), { emergency: ["rate-limit"] });
+    assert.deepEqual(asks, [{ emergency: true, limits: ["rate-limit"] }]);
+    assert.deepEqual([decision.approved, decision.approval, decision.overridden], [true, "granted", ["rate-limit"]]);
+  });
+
+  test("emergency approval: anything but yes refuses, with nothing overridden", async () => {
+    for (const answer of [false, undefined, null, "yes"]) {
+      const decision = await authorizePayment(rateLimited(), async () => answer, { emergency: ["rate-limit"] });
+      assert.deepEqual([decision.approved, decision.approval, decision.overridden], [false, "denied", []]);
+      assert.ok(decision.reasons.some((reason) => /^rate-limit:/.test(reason)));
+      assert.ok(decision.reasons.some((reason) => /human did not approve the emergency override of rate-limit/.test(reason)));
+    }
+  });
+
+  test("without an emergency, a soft failure is refused and nobody is asked", async () => {
+    let asked = 0;
+    const decision = await authorizePayment(rateLimited(), async () => (asked++, true));
+    assert.deepEqual([decision.approved, decision.approval, decision.overridden, asked], [false, "not-asked", [], 0]);
+  });
+
+  test("an emergency request cannot carry a hard failure through", async () => {
+    let asked = 0;
+    const tampered = rateLimited({ quote: honestQuote({ payTo: ATTACKER }) });
+    const decision = await authorizePayment(tampered, async () => (asked++, true), { emergency: ["rate-limit"] });
+    assert.deepEqual([decision.approved, asked], [false, 0]);
   });
 });

@@ -109,6 +109,11 @@ console.log(`Target  POST ${chargeUrl}  { minutes: ${minutes} }\n`);
 // 1. Unpaid request -> 402
 console.log("1. Requesting a charge without paying...");
 const unpaid = await requestCharge();
+if (unpaid.status === 409) {
+  console.error(`   ${deviceId} is in use right now (another simulated robot, or a session that is still running).`);
+  console.error("   Try again in a moment, or start the server with CHARGER_OCCUPANCY=off.");
+  process.exit(1);
+}
 if (unpaid.status !== 402) {
   console.error(`   Expected HTTP 402, got ${unpaid.status}:`, await unpaid.text());
   process.exit(1);

@@ -3,9 +3,9 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { ALLOWED_MINUTES, assertConfig, config, explorerUrl } from "./config.js";
 import { control, streamsWebhook } from "./control.js";
-import { deviceStatus, getDevice, isBusy, listDevices, release, reserve, startCharging } from "./devices.js";
+import { chargeRefusal, deviceStatus, getDevice, holdForQuote, listDevices, noteDiscovery, release, reserve, startCharging, startOccupancy } from "./devices.js";
 import { sseHandler } from "./events.js";
-import { recordPayment } from "./state.js";
+import { getRobot, recordPayment } from "./state.js";
 import { voice } from "./voice.js";
 import { checkPayment, initPayments } from "./x402.js";
 
@@ -23,7 +23,9 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+// Discovery. A robot looking for power may say where it is (?lat=..&lng=..).
 app.get("/devices", (req, res) => {
+  if (req.query.lat !== undefined) noteDiscovery({ lat: Number(req.query.lat), lng: Number(req.query.lng) });
   res.json(listDevices());
 });
 
@@ -42,12 +44,16 @@ app.post("/devices/:id/charge", async (req, res) => {
     return res.status(400).json({ error: "invalid_minutes", allowed: ALLOWED_MINUTES });
   }
 
-  // Don't ask anyone to pay for a charger that's already in use.
-  const busy = () => res.status(409).json({ error: "device_busy", ...deviceStatus(device) });
-  if (isBusy(device)) return busy();
+  // Never ask anyone to pay for a charger that is in use: a clear 409, not a 402.
+  const busy = () => {
+    const refusal = chargeRefusal(device) ?? { status: 409, body: { error: "charger_in_use", message: "charger in use", ...deviceStatus(device) } };
+    return res.status(refusal.status).json(refusal.body);
+  };
+  if (chargeRefusal(device)) return busy();
 
   const payment = await checkPayment(req, { deviceId: device.id, minutes });
   if (!payment.paid) {
+    if (payment.status === 402) holdForQuote(device); // quoted: other robots leave it alone while this one pays
     return res.status(payment.status).set(payment.headers).json(payment.body);
   }
 
@@ -59,7 +65,7 @@ app.post("/devices/:id/charge", async (req, res) => {
     return res.status(settled.status).set(settled.headers).json(settled.body);
   }
 
-  const session = startCharging(device, minutes, settled.txSignature);
+  const session = startCharging(device, minutes, settled.txSignature, getRobot()?.id ?? null);
   recordPayment({
     txSignature: settled.txSignature,
     deviceId: device.id,
@@ -88,6 +94,8 @@ try {
   process.exit(1);
 }
 
+startOccupancy();
+
 app.listen(config.port, () => {
   console.log(`Charger server and dashboard on http://localhost:${config.port}`);
   console.log(`  network      ${config.network} (Solana devnet)`);
@@ -96,5 +104,6 @@ app.listen(config.port, () => {
   console.log(`  facilitator  ${config.facilitatorUrl}`);
   console.log(`  agent token  ${config.agentEventsToken ? "set" : "NOT SET (agent events, approvals and kill switch are disabled)"}`);
   console.log(`  streams      ${config.streamsToken ? "security token set" : "QUICKNODE_STREAMS_TOKEN not set (webhooks are rejected)"}`);
+  console.log(`  occupancy    ${{ off: "off (chargers are always free)", random: "random (other robots come and go)", demo: "demo (the nearest charger is busy on the first charge)" }[config.chargerOccupancy]}`);
   console.log(`  voice        ${config.elevenLabsApiKey ? `ElevenLabs on (tts ${config.ttsModel}, stt ${config.sttModel})` : "off (ELEVENLABS_API_KEY not set)"}`);
 });

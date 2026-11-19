@@ -17,7 +17,8 @@ export function createChargerClient(serverUrl) {
   };
 
   return {
-    listDevices: () => getJson("/devices"),
+    /** Discovery. Pass the robot's position when it is actually looking for a charge. */
+    listDevices: (near) => getJson(near ? `/devices?lat=${near.lat}&lng=${near.lng}` : "/devices"),
     getStatus: (deviceId) => getJson(`/devices/${deviceId}/status`),
 
     /**

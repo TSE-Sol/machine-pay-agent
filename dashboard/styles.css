@@ -543,6 +543,32 @@ code,
 .charger .pill {
   font-variant-numeric: tabular-nums;
 }
+/* Idle: green. In use by another robot: amber. Charging the robot that paid: blue. */
+.pill[data-state="charger-idle"] {
+  color: #7fdc7f;
+  background: var(--good-soft);
+  border-color: rgba(12, 163, 12, 0.4);
+}
+.pill[data-state="charger-idle"] .dot {
+  background: var(--good);
+}
+.pill[data-state="charger-in-use"] {
+  color: #fcd277;
+  background: var(--warning-soft);
+  border-color: rgba(250, 178, 25, 0.45);
+}
+.pill[data-state="charger-in-use"] .dot {
+  background: var(--warning);
+}
+.pill[data-state="charger-charging"] {
+  color: #9cc4f3;
+  background: var(--accent-soft);
+  border-color: rgba(57, 135, 229, 0.5);
+}
+.pill[data-state="charger-charging"] .dot {
+  background: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
 
 .map {
   position: relative;
@@ -584,6 +610,15 @@ code,
   background: var(--surface);
   color: var(--muted);
 }
+.map-actions {
+  display: flex;
+  gap: 6px;
+}
+.map-recenter[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 .map-recenter {
   padding: 5px 9px;
   border-radius: 8px;
@@ -619,10 +654,37 @@ code,
   font-size: 11px;
   font-weight: 700;
 }
-.marker[data-status="charging"] {
+/* Chargers on the map: green when free, amber when another robot is using it, and blue
+   (pulsing) for the one the robot paid for. */
+.marker[data-status="idle"] {
   border-color: var(--good);
   color: #fff;
   background: var(--good);
+}
+.marker[data-status="in_use"] {
+  border-color: var(--warning);
+  color: #1a1300;
+  background: var(--warning);
+}
+.marker[data-status="charging"] {
+  border-color: var(--accent);
+  color: #fff;
+  background: var(--accent);
+  animation: marker-pulse 1.4s ease-out infinite;
+}
+@keyframes marker-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(57, 135, 229, 0.7);
+  }
+  100% {
+    box-shadow: 0 0 0 12px rgba(57, 135, 229, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .marker[data-status="charging"] {
+    animation: none;
+    box-shadow: 0 0 0 4px rgba(57, 135, 229, 0.35);
+  }
 }
 .marker-robot {
   width: 16px;
@@ -660,6 +722,9 @@ code,
 }
 .cycle[data-outcome="charging"] {
   border-color: rgba(12, 163, 12, 0.4);
+}
+.cycle[data-outcome="waiting"] {
+  border-color: rgba(250, 178, 25, 0.45);
 }
 .cycle[data-outcome="refused"],
 .cycle[data-outcome="failed"] {
@@ -786,6 +851,45 @@ code,
   border-color: rgba(208, 59, 59, 0.65);
   background: var(--critical-soft);
 }
+.chip[data-ok="warn"] {
+  color: #fcd277;
+  border-color: rgba(250, 178, 25, 0.45);
+  background: var(--warning-soft);
+}
+
+/* The options the planner weighed, under DISCOVER. */
+.options-title {
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.options {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+.option-name {
+  font-weight: 600;
+}
+.option-facts {
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.option[data-usable="false"] .option-name {
+  color: var(--text-2);
+}
+
 .chip[data-ok="neutral"] {
   color: var(--text-2);
   border-color: var(--hairline);
@@ -1031,6 +1135,50 @@ code,
   font-size: 12.5px;
   color: var(--muted);
 }
+/* Emergency override: the same dialog, in red, naming the limit it would go past. */
+.modal[data-emergency="true"] {
+  border-color: rgba(208, 59, 59, 0.75);
+  box-shadow:
+    0 0 0 1px rgba(208, 59, 59, 0.35),
+    0 24px 80px rgba(0, 0, 0, 0.6);
+}
+.modal[data-emergency="true"] .modal-kicker {
+  color: #f0a3a3;
+}
+.modal[data-emergency="true"] .modal-timer > div {
+  background: var(--critical);
+}
+.modal[data-emergency="true"] #approveButton {
+  background: var(--critical);
+  border-color: var(--critical);
+  color: #fff;
+}
+.modal-emergency {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(208, 59, 59, 0.55);
+  background: var(--critical-soft);
+  color: #f5c9c9;
+  font-size: 13px;
+}
+.modal-emergency ul {
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.modal-emergency li strong {
+  display: block;
+  color: #fff;
+  font-size: 14px;
+}
+.modal-emergency-scope {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
 .modal-mic {
   width: 100%;
   margin-top: 16px;

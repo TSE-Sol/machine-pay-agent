@@ -15,7 +15,7 @@ import { getDevice } from "./devices.js";
 import { emit, subscribe } from "./events.js";
 import { getRobot, getVoiceId, lastPayment, pendingApprovals, resolveApproval, setPaused, setVoiceId } from "./state.js";
 import { executeVoiceCommand, parseVoiceCommand } from "./voice-commands.js";
-import { PREVIEW_LINE, approvalLine, lowBatteryLine, paidLine, planLine, refusedLine, statusLine } from "./voice-lines.js";
+import { PREVIEW_LINE, approvalLine, emergencyLine, lowBatteryLine, paidLine, planLine, refusedLine, statusLine, waitLine } from "./voice-lines.js";
 
 const elevenlabs = config.elevenLabsApiKey ? new ElevenLabsClient({ apiKey: config.elevenLabsApiKey, maxRetries: 1, timeoutInSeconds: 20 }) : null;
 
@@ -116,18 +116,26 @@ subscribe((event) => {
       discovered.set(data.cycleId, data.chargers);
       if (discovered.size > 20) discovered.delete(discovered.keys().next().value);
     }
-    if (phase === "PLAN" && data.planner && notRecently(`plan:${data.deviceId}:${data.minutes}`, 30_000)) {
-      const idle = (discovered.get(data.cycleId) ?? []).filter((c) => c.status === "idle");
-      const nearest = idle.reduce((best, c) => (!best || c.distanceKm < best.distanceKm ? c : best), null);
+    if (phase === "PLAN" && data.planner && data.action !== "wait" && notRecently(`plan:${data.deviceId}:${data.minutes}`, 30_000)) {
+      const options = discovered.get(data.cycleId) ?? [];
+      const nearer = (best, c) => (!best || c.distanceKm < best.distanceKm ? c : best);
+      const nearest = options.filter((c) => c.status === "idle").reduce(nearer, null);
+      // A closer charger that was passed over because another robot is using it.
+      const chosen = options.find((c) => c.id === data.deviceId);
+      const closerBusy = chosen ? options.filter((c) => c.status !== "idle" && c.distanceKm < chosen.distanceKm).reduce(nearer, null) : null;
       say(
         "plan",
         planLine({
           chargerName: getDevice(data.deviceId)?.name ?? data.deviceId,
+          busyName: closerBusy ? (getDevice(closerBusy.id)?.name ?? closerBusy.name) : null,
           isClosest: nearest?.id === data.deviceId,
           minutes: data.minutes,
           amount: config.pricePer15MinBaseUnits * (data.minutes / 15),
         }),
       );
+    }
+    if (phase === "WAIT" && data.waitFor && notRecently(`wait:${data.waitFor}`, 60_000)) {
+      say("wait", waitLine({ chargerName: getDevice(data.waitFor)?.name ?? data.waitFor, minutes: data.minutesUntilFree }));
     }
     if (phase === "REFUSED") {
       const line = refusedLine({ reason: data.reasons?.[0] ?? event.message });
@@ -135,7 +143,11 @@ subscribe((event) => {
     }
   }
 
-  if (event.type === "approval_requested") say("approval", approvalLine());
+  if (event.type === "approval_requested") {
+    const emergency = event.emergency;
+    if (emergency) say("emergency", emergencyLine({ batteryPct: emergency.batteryPct, exceeded: emergency.exceeded.map((limit) => limit.name) }));
+    else say("approval", approvalLine());
+  }
 
   // "Paid + confirmed": speak once an on-chain check has seen the payment. The server's own
   // RPC check usually has by now; otherwise wait a few seconds for QuickNode Streams.

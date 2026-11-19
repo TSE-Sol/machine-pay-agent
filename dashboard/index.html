@@ -137,8 +137,13 @@
     <footer class="footer">Built at UBC 2026 Hackathon · x402 on Solana devnet</footer>
 
     <dialog id="approvalModal" class="modal" aria-labelledby="approvalTitle">
-      <p class="modal-kicker">Human approval needed</p>
+      <p class="modal-kicker" id="approvalKicker">Human approval needed</p>
       <h2 id="approvalTitle">Approve this payment?</h2>
+      <div class="modal-emergency" id="approvalEmergency" hidden>
+        <p id="approvalEmergencyWhy">–</p>
+        <ul id="approvalEmergencyLimits"></ul>
+        <p class="modal-emergency-scope">Approving allows this one payment only. No limit is raised or reset.</p>
+      </div>
       <p class="modal-amount"><span id="approvalAmount">–</span> <small>USDC</small></p>
       <dl class="modal-facts">
         <div>

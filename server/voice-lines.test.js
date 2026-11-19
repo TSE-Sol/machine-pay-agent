@@ -1,7 +1,7 @@
 // Tests for the robot's spoken lines: built from event data, not fixed numbers.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { approvalLine, lowBatteryLine, moneyWords, numberWords, paidLine, planLine, refusedLine, spokenName, statusLine } from "./voice-lines.js";
+import { approvalLine, emergencyLine, waitLine, lowBatteryLine, moneyWords, numberWords, paidLine, planLine, refusedLine, spokenName, statusLine } from "./voice-lines.js";
 
 describe("spoken lines", () => {
   test("low battery uses the real battery level", () => {
@@ -37,6 +37,25 @@ describe("spoken lines", () => {
     assert.equal(refusedLine({ reason: "kill-switch: agent is paused" }), "Payment refused: payments are paused.");
     assert.equal(refusedLine({ reason: "approval: a human did not approve this payment" }), "Payment refused: it was not approved.");
     assert.equal(refusedLine({ reason: "something new" }), "Payment refused: a safety check failed.");
+  });
+
+  test("a closer charger that is busy is named when the robot goes elsewhere", () => {
+    assert.equal(
+      planLine({ chargerName: "East 6th St Dock", busyName: "Congress Ave Robot Dock", isClosest: true, minutes: 15, amount: 200000 }),
+      "Congress Avenue dock is busy. Going to East 6th Street dock. Buying fifteen minutes for twenty cents.",
+    );
+  });
+
+  test("waiting for a busy charger is said out loud, with the real wait", () => {
+    assert.equal(waitLine({ chargerName: "Congress Ave Robot Dock", minutes: 12 }), "Congress Avenue dock is busy. Waiting twelve minutes for it.");
+    assert.equal(waitLine({ chargerName: "East 6th St Dock", minutes: 1 }), "East 6th Street dock is busy. Waiting one minute for it.");
+  });
+
+  test("an emergency override request says the battery level and which limit is in the way", () => {
+    assert.equal(emergencyLine({ batteryPct: 6, exceeded: ["rate-limit"] }), "Battery at 6 percent. Rate limit reached. Approve an emergency charge?");
+    assert.equal(emergencyLine({ batteryPct: 9.4, exceeded: ["daily"] }), "Battery at 9 percent. Daily budget reached. Approve an emergency charge?");
+    assert.equal(emergencyLine({ batteryPct: 3, exceeded: ["rate-limit", "daily"] }), "Battery at 3 percent. Rate limit and daily budget reached. Approve an emergency charge?");
+    assert.equal(emergencyLine({ batteryPct: 3, exceeded: ["something-new"] }), "Battery at 3 percent. A spending limit reached. Approve an emergency charge?");
   });
 
   test("status reports battery, budget left and the last payment", () => {

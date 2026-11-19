@@ -17,9 +17,12 @@ const logLine = {
   payment_rejected: (e) => `[REJECTED] ${e.deviceId} reason=${e.reason}`,
   charging_started: (e) => `[ON] ${e.deviceId} until ${clock(e.expiresAt)}`,
   charging_ended: (e) => `[OFF] ${e.deviceId}`,
+  charger_occupied: (e) => `[IN USE] ${e.deviceId} taken by another robot for ${e.minutes} min`,
+  charger_freed: (e) => `[FREE] ${e.deviceId} is idle again`,
   // Events relayed from the agent. The routine ticks are not echoed to this console.
   agent_event: (e) => (["OBSERVE", "DECIDE", "CHARGING"].includes(e.phase) ? null : `[AGENT] ${e.phase}: ${e.message}`),
-  approval_requested: (e) => `[APPROVAL?] ${e.deviceId} ${formatUsdc(e.amount)} USDC (id ${e.approvalId})`,
+  approval_requested: (e) =>
+    `[APPROVAL?] ${e.emergency ? `EMERGENCY OVERRIDE (battery ${e.emergency.batteryPct}%, over ${e.emergency.exceeded.map((x) => x.name).join(" and ")}) ` : ""}${e.deviceId} ${formatUsdc(e.amount)} USDC (id ${e.approvalId})`,
   approval_resolved: (e) => `[APPROVAL] ${e.decision} by ${e.by} (id ${e.approvalId})`,
   agent_paused: (e) => `[KILL SWITCH] payments ${e.paused ? "PAUSED" : "resumed"}`,
   onchain_confirmed: (e) =>

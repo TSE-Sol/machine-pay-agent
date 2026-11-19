@@ -93,20 +93,26 @@ export const noteStreamsDelivery = () => (lastStreamsDelivery = new Date().toISO
 
 const approvals = new Map(); // id -> { id, status: "pending" | "approved" | "denied", by, ... }
 
-export function createApproval({ id, deviceId, minutes, amount, payTo, timeoutSeconds = 60 }) {
+/**
+ * `emergency` is set when the agent asks to go past a soft limit because the battery is
+ * critically low: { batteryPct, exceeded: [{ name, reason }] }. It is shown and spoken as
+ * an emergency override; answering it works exactly like any other approval.
+ */
+export function createApproval({ id, deviceId, minutes, amount, payTo, timeoutSeconds = 60, emergency = null }) {
   const approval = {
     id,
     deviceId,
     minutes,
     amount,
     payTo,
+    emergency,
     status: "pending",
     by: null,
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(),
   };
   approvals.set(id, approval);
-  emit("approval_requested", { approvalId: id, deviceId, minutes, amount, payTo, expiresAt: approval.expiresAt });
+  emit("approval_requested", { approvalId: id, deviceId, minutes, amount, payTo, emergency, expiresAt: approval.expiresAt });
   // No answer in time means no.
   setTimeout(() => resolveApproval(id, "deny", "timeout"), timeoutSeconds * 1000).unref();
   return approval;
@@ -145,6 +151,8 @@ export function setPaused(paused) {
 export function snapshot(devices) {
   return {
     serverTime: new Date().toISOString(),
+    secondsPerMinute: config.secondsPerMinute, // real seconds per simulated minute (for countdowns)
+    chargerOccupancy: config.chargerOccupancy,
     network: config.network,
     merchantWallet: config.merchantWallet,
     usdcMint: config.usdcMint,
