@@ -2,8 +2,7 @@
 
 **AI agents can already pay for data. This one pays for electricity.**
 
-[![Demo video](https://img.shields.io/badge/Demo-video-10b981)](https://TODO-ADD-DEMO-VIDEO-URL)
-[![Devpost](https://img.shields.io/badge/Devpost-submission-003e54)](https://TODO-ADD-DEVPOST-URL)
+[![Demo video](https://img.shields.io/badge/Demo-video-10b981)](https://youtu.be/1W35Q_In-TI)
 
 Built from scratch during the UBC 2026 Hackathon (Nov 12–20, 2026). Agentic Payments & AI track.
 
@@ -143,7 +142,7 @@ Every payment is confirmed twice, by two independent sources. The x402 facilitat
 
 | | |
 | --- | --- |
-| **Stream** | `TODO-QUICKNODE-STREAM-NAME` (the Stream's name in the QuickNode dashboard) |
+| **Stream** | `machine-pay-usdc` (the Stream's name in the QuickNode dashboard) |
 | **Network** | Solana devnet |
 | **Dataset** | Block (full blocks with all transactions) |
 | **Filter** | [streams/filter.js](streams/filter.js): keep only successful transactions that move the devnet USDC mint into a token account owned by the merchant wallet |
@@ -259,7 +258,7 @@ Full signatures:
 4cPw27u5EMD1H9M9YMkXXyZAPx6adacSKB1VnRqLRDcqwyifYzL2shoW3eAwG5cExWquwKefiyayX5xftz83nmes
 ```
 
-Tests: `npm test` runs 128 tests in 24 suites, all passing (run on 2026-11-13). They cover the guardrails, the decision loop, approvals, the Streams webhook and filter, voice commands and lines, the demo reset and the launcher.
+Tests: `npm test` runs 258 tests in 44 suites, all passing (run on 2026-11-19). They cover the guardrails, the decision loop, approvals, the Streams webhook and filter, voice commands and lines, the demo reset and the launcher.
 
 ## Honest scope
 
