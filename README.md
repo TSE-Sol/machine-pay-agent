@@ -258,7 +258,7 @@ Full signatures:
 4cPw27u5EMD1H9M9YMkXXyZAPx6adacSKB1VnRqLRDcqwyifYzL2shoW3eAwG5cExWquwKefiyayX5xftz83nmes
 ```
 
-Tests: `npm test` runs 258 tests in 44 suites, all passing (run on 2026-11-19). They cover the guardrails, the decision loop, approvals, the Streams webhook and filter, voice commands and lines, the demo reset and the launcher.
+Tests: `npm test` runs 258 tests in 44 suites, all passing (run on 2026-11-19). They cover the guardrails, the emergency override, the decision loop, approvals, the planner, charger occupancy, street routing, robot movement, the Streams webhook and filter, voice commands and lines, the demo reset and the launcher.
 
 ## Honest scope
 
